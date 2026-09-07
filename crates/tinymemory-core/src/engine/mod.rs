@@ -72,6 +72,9 @@ pub use sync::{
 };
 // Crate-private seam for `crate::sources::sync` (openhuman#5820); not host surface.
 pub(crate) use sync::run_source_pipeline_core;
+// Crate-private seam for `crate::backfill` (openhuman#6051): the ingest gate
+// asked by the funnel's own identity, so the walk never re-derives it.
+pub(crate) use sync::connector_item_already_treed;
 // The audit type, under the seam path OpenHuman already names
 // (`memory::tinycortex::SyncAuditEntry` embeds it in an RPC response type).
 // The type itself is core-owned (#18 §B1a); only the address is preserved.

@@ -14,13 +14,22 @@
 //! the `{toolkit}:{connection_id}` identity: two call sites owning one rule is
 //! exactly what produced #6007.
 //!
-//! # Idempotent by construction, not by bookkeeping
+//! # Idempotent by construction, resumable by asking first
 //!
 //! The ingest pipeline answers `already_ingested` when its transaction persists
 //! nothing, so running this twice writes nothing the second time. There is no
 //! watermark to keep and no way for an interrupted run to corrupt anything —
-//! the worst case is repeated work. `limit` exists to bound *cost*, not to
-//! guarantee correctness.
+//! the worst case is repeated work.
+//!
+//! `limit` bounds *cost*: it counts the documents a pass reads and files, not
+//! the documents it looks at. A document the tree already holds is recognised
+//! by asking the ingest gate first — one keyed lookup, by the funnel's own
+//! identity — and is never charged. That is what makes "call again" a real
+//! resume story. The first version charged the limit before the gate could
+//! answer, and because `list_documents` yields newest first — exactly the
+//! documents the sync path had already filed — a large account re-examined the
+//! same `limit` filed documents on every pass and never reached the rest
+//! (openhuman#6051).
 //!
 //! # Why it costs what it costs
 //!
@@ -37,7 +46,7 @@ use crate::sources::SourceKind;
 use crate::store::MemoryClientRef;
 use crate::Config;
 
-/// Documents examined per pass when the caller names no bound.
+/// Documents read and filed per pass when the caller names no bound.
 ///
 /// Deliberately modest: a pass is resumable (just call again), and a caller
 /// that wants the whole account can say so. The default protects the operator
@@ -53,17 +62,22 @@ const MAX_NOTES: usize = 20;
 /// What one backfill pass examined and wrote.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BackfillReport {
-    /// Documents examined.
+    /// Documents charged against the limit: read and filed, or — on a dry run
+    /// — the ones a real pass would read and file. A document the tree already
+    /// holds is not counted here.
     pub scanned: u64,
     /// Documents that produced new memory-tree rows.
     pub ingested: u64,
     /// Documents the tree already held. Not a failure — this is the counter
-    /// that makes a repeated run readable as "nothing left to do".
+    /// that makes a repeated run readable as "nothing left to do". Recognised
+    /// before any budget is spent, so they never stand between a pass and the
+    /// documents behind them.
     pub already_present: u64,
     /// Documents left alone: no resolvable scope, or a tolerated read/ingest
     /// failure. Never filed under a guess.
     pub skipped: u64,
-    /// Whether the pass stopped on its limit with documents still unexamined.
+    /// Whether the pass stopped on its limit with documents still waiting to be
+    /// filed.
     pub more_pending: bool,
     /// Bounded, human-readable reasons behind `skipped`.
     pub notes: Vec<String>,
@@ -86,9 +100,10 @@ struct Target {
 
 /// Walk the connector namespaces, feeding stored documents into the memory tree.
 ///
-/// `dry_run` reports what a real pass would examine without reading any content
-/// or writing anything, which is the only honest way to show an operator the
-/// size of the job before they pay for it.
+/// `dry_run` reports what a real pass would read and file — and what the tree
+/// already holds — without reading any content or writing anything, which is
+/// the only honest way to show an operator the size of the job before they pay
+/// for it.
 pub async fn backfill_connector_trees(
     config: &Config,
     client: &MemoryClientRef,
@@ -123,10 +138,6 @@ pub async fn backfill_connector_trees(
             .unwrap_or_default();
 
         for document in documents {
-            if report.scanned >= limit {
-                report.more_pending = true;
-                break 'targets;
-            }
             let Some(key) = document.get("key").and_then(serde_json::Value::as_str) else {
                 // A document row with no key cannot be read back or addressed
                 // in the tree; counting it as skipped keeps `scanned` honest.
@@ -137,6 +148,59 @@ pub async fn backfill_connector_trees(
                 ));
                 continue;
             };
+
+            // Ask before spending. A document the tree already holds costs one
+            // keyed lookup and none of the limit; only a document that still
+            // needs reading and filing is charged, so a pass that stops on its
+            // limit resumes past everything already filed when called again.
+            // The probe has to come before the limit check, or a pass could not
+            // tell "more to file" from "more already filed".
+            match crate::engine::connector_item_already_treed(
+                config,
+                &target.toolkit,
+                &target.connection_id,
+                key,
+            ) {
+                Ok(Some(true)) => {
+                    report.already_present = report.already_present.saturating_add(1);
+                    // A filed document is the only kind this loop handles
+                    // without awaiting anything, and on a large account they
+                    // come in long runs — every document the sync path has
+                    // already treed. Hand the runtime a turn per document so
+                    // a pass over tens of thousands of them does not hold its
+                    // worker thread for the whole run.
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Ok(Some(false)) => {}
+                // The scope was built from the registry above, so this is close
+                // to unreachable — but the funnel would refuse the same item,
+                // and it is counted the way that refusal is.
+                Ok(None) => {
+                    report.skipped = report.skipped.saturating_add(1);
+                    continue;
+                }
+                Err(error) => {
+                    let rendered = format!("{error:#}");
+                    crate::corruption::escalate_or_count(
+                        "connector tree backfill",
+                        config,
+                        error,
+                        &failures,
+                    )?;
+                    report.skipped = report.skipped.saturating_add(1);
+                    report.note(format!(
+                        "{}: the tree gate could not be read ({rendered})",
+                        target.namespace
+                    ));
+                    continue;
+                }
+            }
+
+            if report.scanned >= limit {
+                report.more_pending = true;
+                break 'targets;
+            }
             report.scanned = report.scanned.saturating_add(1);
             if dry_run {
                 continue;

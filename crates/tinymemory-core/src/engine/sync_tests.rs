@@ -769,3 +769,73 @@ async fn the_shared_funnel_skips_either_blank_scope_half() {
         );
     }
 }
+
+/// The gate probe the backfill spends by (openhuman#6051) answers through the
+/// same identity the funnel files under: nothing before the ingest, the item
+/// after it — including when the caller spells the scope halves differently
+/// from the writer, since both normalise through one derivation — and `None`
+/// for the scopeless item the funnel itself would skip.
+#[tokio::test]
+async fn the_gate_probe_agrees_with_the_funnel_it_files_through() {
+    use tinymemory_api::host::test_support::TestHostConfig;
+    use tinymemory_api::host::MemoryHostConfig;
+
+    crate::test_seams::init();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut host = TestHostConfig::default();
+    host.workspace_dir = workspace.path().join("workspace");
+    let config = host.to_arc();
+
+    assert_eq!(
+        super::connector_item_already_treed(&*config, "gmail", "conn-1", "msg-1")
+            .expect("the gate answers"),
+        Some(false),
+        "an item the tree has never seen is not treed"
+    );
+
+    super::ingest_connector_item_into_tree(
+        &*config,
+        "gmail",
+        "conn-1",
+        "msg-1",
+        "Quarterly planning",
+        "Let's finalise the Q3 roadmap.",
+    )
+    .await
+    .expect("ingest")
+    .expect("a scoped item reaches the pipeline");
+
+    assert_eq!(
+        super::connector_item_already_treed(&*config, "gmail", "conn-1", "msg-1")
+            .expect("the gate answers"),
+        Some(true),
+        "the funnel's own write is recognised"
+    );
+    assert_eq!(
+        super::connector_item_already_treed(&*config, " Gmail ", " conn-1 ", "msg-1")
+            .expect("the gate answers"),
+        Some(true),
+        "the probe normalises the scope the way the funnel did, so it asks by the key the \
+         funnel wrote"
+    );
+    assert_eq!(
+        super::connector_item_already_treed(&*config, "gmail", "conn-1", "msg-2")
+            .expect("the gate answers"),
+        Some(false),
+        "a different item under the same scope is its own key"
+    );
+
+    for (toolkit, connection_id, blank_half) in [
+        ("   ", "conn-1", "toolkit"),
+        ("gmail", "   ", "connection_id"),
+    ] {
+        assert_eq!(
+            super::connector_item_already_treed(&*config, toolkit, connection_id, "msg-1")
+                .unwrap_or_else(|error| panic!(
+                    "a blank {blank_half} is a skip, not an error: {error:#}"
+                )),
+            None,
+            "a blank {blank_half} has no tree identity to ask by"
+        );
+    }
+}
