@@ -4073,7 +4073,7 @@ fn provider_with_embedder(
 #[tokio::test(flavor = "multi_thread")]
 async fn source_items_are_embedded_together_rather_than_one_request_per_item() {
     use tinymemory_api::provider::types::SourceItem;
-    use tinymemory_api::provider::MemoryProvider;
+    use tinymemory_api::provider::{ChunkQuery, MemoryProvider};
     use tinymemory_api::types::MemoryTaint;
 
     let workspace = tempfile::tempdir().expect("workspace");
@@ -4081,7 +4081,6 @@ async fn source_items_are_embedded_together_rather_than_one_request_per_item() {
         requests: std::sync::Mutex::new(Vec::new()),
     });
     let provider = provider_with_embedder(workspace.path(), Arc::clone(&embedder));
-    let config = provider_config(workspace.path(), serde_json::Value::Null);
     let source = provider.as_sources().expect("SourceSink");
 
     let items: Vec<SourceItem> = (1..=5)
@@ -4110,8 +4109,12 @@ async fn source_items_are_embedded_together_rather_than_one_request_per_item() {
          got {requests:?}"
     );
     // The tree funnel still runs once per written item (openhuman#6007).
+    let chunks = provider.as_chunks().expect("Chunks");
     assert_eq!(
-        tinymemory_core::store::chunks::count_chunks(&config).expect("count chunks"),
+        chunks
+            .count_chunks(&ChunkQuery::default(), None)
+            .await
+            .expect("count chunks"),
         5,
         "every written item must still reach the memory tree"
     );

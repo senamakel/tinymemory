@@ -55,7 +55,7 @@ mod write_gate;
 pub use kinds::MemoryKind;
 pub use traits::{ObsidianFile, ObsidianRepresentable, VectorEmbeddable};
 
-pub use client::{MemoryClient, MemoryClientRef, MemoryState};
+pub use client::{BatchPutOutcome, MemoryClient, MemoryClientRef, MemoryState};
 pub use factories::{
     active_embedding_signature, create_memory, create_memory_for_migration,
     create_memory_with_local_ai, effective_embedding_settings, effective_memory_backend_name,

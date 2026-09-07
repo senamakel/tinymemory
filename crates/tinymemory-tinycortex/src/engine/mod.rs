@@ -2261,12 +2261,25 @@ impl MemorySourceSink for TinycortexProvider {
             }
         }
 
-        // One store call for the whole batch. Its result holds one entry per
+        // One store call for the whole batch. Its results hold one entry per
         // document attempted, in order, with a failed write always last, so
-        // walking it in order keeps exactly the per-item accounting the old
+        // walking them in order keeps exactly the per-item accounting the old
         // one-write-per-item loop had.
-        let results = self.client.put_docs(inputs).await;
-        for (result, tree_item) in results.into_iter().zip(tree_items) {
+        let batch = self.client.put_docs(inputs).await;
+        if batch.dropped_extractions > 0 {
+            // Best-effort by the queue's contract: the documents and (below)
+            // their memory-tree chunks are stored; only the namespace graph
+            // extraction for these items was skipped. Named per source so an
+            // operator can tell which sync overran the queue.
+            log::warn!(
+                "[tinycortex:sources] graph extraction skipped for {} of {} written \
+                 item(s) of source `{source_id}`: the ingestion queue refused the \
+                 job(s); the documents and their memory-tree chunks are stored",
+                batch.dropped_extractions,
+                batch.results.iter().filter(|result| result.is_ok()).count()
+            );
+        }
+        for (result, tree_item) in batch.results.into_iter().zip(tree_items) {
             match result {
                 Ok(id) => {
                     outcome.written = outcome.written.saturating_add(1);
