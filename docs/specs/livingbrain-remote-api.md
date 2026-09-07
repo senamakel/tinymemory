@@ -72,7 +72,7 @@ example `LIVINGBRAIN_API_KEY`, and pass the value at construction.
 
 | TinyMemory-facing operation | LivingBrain endpoint | Required behavior |
 | --- | --- | --- |
-| `capture` | `POST /v1/brains/{brainId}/captures` | Submit note, text, URL, file, transcript, or integration input. Map host provenance to `source` and stable external identity to `originRef`. |
+| `capture` | `POST /v1/brains/{brainId}/captures` | Submit note, text, URL, file, transcript, or integration input. `Capture::source` carries host provenance and `origin_ref` carries stable external identity. |
 | `capture_batch` | `POST /v1/brains/{brainId}/captures/batch` | Submit a bounded batch and return the service's per-source outcome. |
 | `capture_chat_turn` | `POST /v1/brains/{brainId}/captures/chat-turn` | Return LivingBrain's `worthy` decision; a not-worthy turn is a successful result, not an error. |
 | `search` | `POST /v1/brains/{brainId}/search` | Return native page-search results, including `similarity`, page state, summary, and slug. |

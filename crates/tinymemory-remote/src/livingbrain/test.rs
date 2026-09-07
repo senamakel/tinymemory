@@ -54,6 +54,8 @@ async fn capture_batch(headers: HeaderMap, Json(body): Json<Value>) -> (StatusCo
         );
     }
     assert_eq!(body["captures"][0]["originRef"], "event:batch-1");
+    assert_eq!(body["captures"][0]["kind"], "text");
+    assert_eq!(body["captures"][0]["source"], "import");
     (
         StatusCode::CREATED,
         Json(json!({"items": [{"id": "source-batch-1", "status": "queued"}]})),
@@ -210,6 +212,7 @@ async fn simulated_api_carries_required_headers_and_native_payloads() {
             content: Some("Weekly updates should be concise".into()),
             fetch_url: None,
             origin_ref: Some("event:123".into()),
+            source: Some("crm".into()),
             label: Some("Call notes".into()),
         })
         .await
@@ -220,12 +223,17 @@ async fn simulated_api_carries_required_headers_and_native_payloads() {
         state.captured.lock().expect("state lock")[0]["originRef"],
         "event:123"
     );
+    assert_eq!(
+        state.captured.lock().expect("state lock")[0]["source"],
+        "crm"
+    );
     let batch = client
         .capture_batch(&[Capture {
-            kind: CaptureKind::Note,
+            kind: CaptureKind::Text,
             content: Some("A durable batch note".into()),
             fetch_url: None,
             origin_ref: Some("event:batch-1".into()),
+            source: Some("import".into()),
             label: None,
         }])
         .await
@@ -294,6 +302,7 @@ fn connection_fields_and_capture_shape_are_checked_without_a_request() {
         content: Some("text".into()),
         fetch_url: Some("https://example.test".into()),
         origin_ref: None,
+        source: None,
         label: None,
     };
     assert!(invalid.validate().is_err());

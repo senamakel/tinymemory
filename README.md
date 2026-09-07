@@ -368,6 +368,7 @@ async fn capture_note() -> anyhow::Result<()> {
         content: Some("Customer prefers concise weekly updates.".into()),
         fetch_url: None,
         origin_ref: Some("crm:customer-42:note-9".into()),
+        source: Some("crm".into()),
         label: Some("CRM note".into()),
     }).await?;
     Ok(())
