@@ -159,6 +159,19 @@ const RECALL_QUERY_CAP: usize = 256;
 /// failure this whole adapter exists to avoid.
 const MAX_PAGES: usize = 500;
 
+/// How many scopes one `v1/scopes/list` call asks for.
+///
+/// The endpoint defaults to **50** and says so nowhere: its OpenAPI entry
+/// documents no parameters at all, and the response carries only `items` — no
+/// cursor, no `has_more`, no total. So a bare call silently returns the first
+/// fifty of however many exist, which was measured on a live engine holding 93.
+///
+/// `limit` is honoured even though it is undocumented, and there is nothing to
+/// page with, so the only defence is to ask for far more than a namespace count
+/// should ever reach and treat a full response as untrustworthy — see
+/// [`CortexDialect::scopes`].
+const SCOPE_LIST_LIMIT: usize = 10_000;
+
 /// CortexDB, adapted to TinyMemory's keyed contract.
 #[derive(Debug)]
 pub struct CortexMemory {
@@ -606,27 +619,48 @@ impl CortexDialect {
     }
 
     /// Every scope this deployment holds that this adapter wrote.
+    ///
+    /// Asks for [`SCOPE_LIST_LIMIT`] explicitly. Without it the engine returns
+    /// its undocumented default of fifty, and the callers that matter here —
+    /// `entries`, `namespace_summaries`, and through them `export_page` and
+    /// `opencompany memory migrate` — would enumerate a *subset* of a company's
+    /// namespaces while reporting success. Per-namespace reads never notice,
+    /// because they address a namespace directly, which is why a truncation
+    /// here stays invisible until a migration quietly leaves records behind.
+    ///
+    /// A response that fills the limit is refused rather than returned. There
+    /// is no cursor and no total to check against, so a full page is
+    /// indistinguishable from a truncated one, and the same reasoning as
+    /// [`MAX_PAGES`] applies: a silently short listing is worse than an error,
+    /// because the caller cannot tell it happened.
     async fn scopes(&self) -> anyhow::Result<Vec<String>> {
         let listing: Value = self
             .client
             .json(
                 Method::GET,
-                "v1/scopes/list",
+                &format!("v1/scopes/list?limit={SCOPE_LIST_LIMIT}"),
                 None,
                 Attempts::RetryTransient,
             )
             .await?;
-        Ok(listing
+        let items = listing
             .get("items")
             .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|s| s.get("path").and_then(Value::as_str))
-                    .filter_map(Self::namespace_of)
-                    .collect()
-            })
-            .unwrap_or_default())
+            .cloned()
+            .unwrap_or_default();
+        if items.len() >= SCOPE_LIST_LIMIT {
+            anyhow::bail!(
+                "scope listing returned {SCOPE_LIST_LIMIT} entries, the limit it was asked \
+                 for; the engine offers no cursor, so a complete listing cannot be \
+                 distinguished from a truncated one and enumerating namespaces would \
+                 silently skip whatever came after"
+            );
+        }
+        Ok(items
+            .iter()
+            .filter_map(|s| s.get("path").and_then(Value::as_str))
+            .filter_map(Self::namespace_of)
+            .collect())
     }
 }
 
