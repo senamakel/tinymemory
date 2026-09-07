@@ -786,23 +786,28 @@ pub struct FlushOutcome {
 /// Four counters rather than one, because "did nothing" has three very
 /// different causes a caller has to be able to tell apart: the tree already
 /// held everything (`already_present`), nothing could be addressed
-/// (`skipped`), or there was nothing to look at (`scanned: 0`). Collapsing
-/// them would make an account whose scope could not be resolved read exactly
-/// like one that is fully backfilled.
+/// (`skipped`), or there was nothing to file at all (`scanned: 0` with the
+/// other two at zero). Collapsing them would make an account whose scope
+/// could not be resolved read exactly like one that is fully backfilled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackfillTreesOutcome {
-    /// Documents examined this pass.
+    /// Documents charged against the limit this pass: read and filed, or on a
+    /// dry run the ones a real pass would read and file. A document the tree
+    /// already holds is reported under `already_present` instead.
     pub scanned: u64,
     /// Documents that produced new memory-tree rows.
     pub ingested: u64,
     /// Documents the tree already held. Not a failure: this is what makes a
-    /// repeated pass readable as "nothing left to do".
+    /// repeated pass readable as "nothing left to do". Recognised before any
+    /// budget is spent, so they never stand between a pass and the documents
+    /// behind them (openhuman#6051).
     pub already_present: u64,
     /// Documents left alone — no resolvable scope, or a tolerated failure.
     /// Never filed under a guess.
     pub skipped: u64,
-    /// Whether the pass stopped on its limit with documents still unexamined.
-    /// The caller resumes by calling again; there is no cursor to carry.
+    /// Whether the pass stopped on its limit with documents still waiting to
+    /// be filed. The caller resumes by calling again; there is no cursor to
+    /// carry, because a document already filed costs the next pass nothing.
     pub more_pending: bool,
     /// Bounded, human-readable reasons behind `skipped`.
     pub notes: Vec<String>,
@@ -811,11 +816,12 @@ pub struct BackfillTreesOutcome {
 /// How much of the backfill to attempt, and whether to write at all.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackfillTreesRequest {
-    /// Documents to examine at most. `None` leaves the bound to the driver.
+    /// Documents to read and file at most. `None` leaves the bound to the
+    /// driver.
     ///
     /// A bound rather than a cursor because the work is idempotent: the pass
-    /// re-reads what it already treed and the ingest gate answers
-    /// `already_ingested`, so resuming is just calling again.
+    /// asks the ingest gate before it spends, a document the tree already holds
+    /// costs nothing, and so resuming is just calling again (openhuman#6051).
     pub limit: Option<u64>,
     /// Report what a real pass would examine, and write nothing.
     ///

@@ -350,7 +350,9 @@ pub trait MemoryMaintenance: Send + Sync {
     /// Idempotent, and by construction rather than by bookkeeping — the ingest
     /// gate answers `already_ingested` for a document the tree already holds, so
     /// a second pass writes nothing and an interrupted pass loses nothing. That
-    /// is also why `limit` bounds cost rather than carrying a cursor.
+    /// is also why `limit` bounds cost rather than carrying a cursor: a pass asks
+    /// that gate before it spends, so a document already filed is reported but
+    /// never charged, and calling again advances past it (openhuman#6051).
     ///
     /// Expensive on purpose to call explicitly: a pass is one read and one set
     /// of chunk embeddings per document. A driver must not run this on its own

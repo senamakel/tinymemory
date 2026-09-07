@@ -147,21 +147,21 @@ pub async fn ingest_connector_item_into_tree(
     title: &str,
     content: &str,
 ) -> anyhow::Result<Option<crate::ingest_pipeline::IngestResult>> {
-    let toolkit = toolkit.trim().to_ascii_lowercase();
-    let connection_id = connection_id.trim();
-    // A blank toolkit/connection would yield a scope with no platform prefix
-    // (`":conn"`), which no retrieval kind matches; skip rather than write an
-    // unreachable tree. The caller's own store still holds the item.
-    if toolkit.is_empty() || connection_id.is_empty() {
+    // The caller's own store still holds a scopeless item; it is only the tree
+    // that skips it.
+    let Some(identity) = connector_item_identity(toolkit, connection_id, item_id) else {
         tracing::debug!(
             item_id = %item_id,
             "[tinycortex:sync] skipping memory-tree ingest: item has no toolkit/connection scope"
         );
         return Ok(None);
-    }
-    let tree_scope = format!("{toolkit}:{connection_id}");
-    let source_id = format!("{tree_scope}:{item_id}");
-    let owner = format!("{toolkit}-sync:{connection_id}");
+    };
+    let ConnectorItemIdentity {
+        tree_scope,
+        source_id,
+        owner,
+        toolkit,
+    } = identity;
     let input = tinycortex::memory::ingest::canonicalize::document::DocumentInput {
         provider: format!("composio:{toolkit}"),
         title: title.to_string(),
@@ -180,6 +180,84 @@ pub async fn ingest_connector_item_into_tree(
     .await
     .map(Some)
     .map_err(|error| anyhow::anyhow!("memory-tree ingest failed for source `{source_id}`: {error}"))
+}
+
+/// The tree identity of one connector item, derived once for every reader and
+/// writer of it.
+///
+/// Three names that must agree with each other and with what the sync path
+/// wrote: the tree scope, the per-item source id under it, and the owner. They
+/// are built here and nowhere else — [`ingest_connector_item_into_tree`] files
+/// under them and [`connector_item_already_treed`] asks the gate by them, so a
+/// backfill that probes before it files cannot probe by one name and file under
+/// another. Two call sites owning this rule is what produced openhuman#6007.
+struct ConnectorItemIdentity {
+    /// `{toolkit}:{connection_id}` — the `path_scope` retrieval resolves by
+    /// platform prefix, and the literal prefix OpenHuman counts a source's
+    /// ingest by.
+    tree_scope: String,
+    /// `{tree_scope}:{item_id}` — the ingest gate's key, one per item so each
+    /// message admits independently.
+    source_id: String,
+    /// `{toolkit}-sync:{connection_id}`.
+    owner: String,
+    /// The normalised toolkit, for the ingest tag and provider name.
+    toolkit: String,
+}
+
+/// Derives the identity, or `None` when either scope half is blank.
+///
+/// A blank toolkit/connection would yield a scope with no platform prefix
+/// (`":conn"`), which no retrieval kind matches; callers skip rather than write
+/// — or probe for — an unreachable tree.
+fn connector_item_identity(
+    toolkit: &str,
+    connection_id: &str,
+    item_id: &str,
+) -> Option<ConnectorItemIdentity> {
+    let toolkit = toolkit.trim().to_ascii_lowercase();
+    let connection_id = connection_id.trim();
+    if toolkit.is_empty() || connection_id.is_empty() {
+        return None;
+    }
+    let tree_scope = format!("{toolkit}:{connection_id}");
+    Some(ConnectorItemIdentity {
+        source_id: format!("{tree_scope}:{item_id}"),
+        owner: format!("{toolkit}-sync:{connection_id}"),
+        tree_scope,
+        toolkit,
+    })
+}
+
+/// Whether the memory tree already holds a connector item, asked by the same
+/// identity [`ingest_connector_item_into_tree`] files it under (openhuman#6051).
+///
+/// Answers `Ok(None)` for an item with no resolvable scope — the item the funnel
+/// would skip — and the ingest gate's answer otherwise. That is the gate's
+/// best-effort read, not its transactional claim: a concurrent ingest can file
+/// the item between this answer and a caller's own ingest, in which case that
+/// ingest answers `already_ingested` and nothing is written twice. Callers use
+/// it to decide what to *spend* on — a backfill pass that charged its limit for
+/// documents the tree already held could never advance past them — while
+/// correctness stays with the claim inside the ingest.
+///
+/// # Errors
+/// Returns the store's error when the gate cannot be read.
+pub(crate) fn connector_item_already_treed(
+    config: &Config,
+    toolkit: &str,
+    connection_id: &str,
+    item_id: &str,
+) -> anyhow::Result<Option<bool>> {
+    let Some(identity) = connector_item_identity(toolkit, connection_id, item_id) else {
+        return Ok(None);
+    };
+    crate::store::chunks::store::is_source_ingested(
+        config,
+        crate::store::chunks::types::SourceKind::Document,
+        &identity.source_id,
+    )
+    .map(Some)
 }
 
 /// [`ingest_connector_item_into_tree`] plus the failure policy every connector
