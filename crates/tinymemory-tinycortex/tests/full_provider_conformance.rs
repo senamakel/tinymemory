@@ -4016,3 +4016,151 @@ async fn a_connector_sync_reaches_the_memory_tree_and_is_forgotten_with_its_sour
          (openhuman#6007)"
     );
 }
+
+/// Embedder that records the size of every request, so a test can prove how
+/// many provider round-trips a batch of source items paid for.
+struct RequestCountingEmbedder {
+    requests: std::sync::Mutex<Vec<usize>>,
+}
+
+#[async_trait::async_trait]
+impl tinymemory_api::host::EmbeddingProvider for RequestCountingEmbedder {
+    fn name(&self) -> &str {
+        "counting"
+    }
+
+    fn model_id(&self) -> &str {
+        "counting-test"
+    }
+
+    fn dimensions(&self) -> usize {
+        3
+    }
+
+    async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(texts.len());
+        Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
+    }
+}
+
+/// A provider whose document store embeds through `embedder`. The store takes
+/// its embedder directly, so this bypasses the process-global seam and leaves
+/// what every other test in this binary sees untouched.
+fn provider_with_embedder(
+    workspace: &std::path::Path,
+    embedder: Arc<RequestCountingEmbedder>,
+) -> TinycortexProvider {
+    tinymemory_core::embedding_host::set_embedding_host(Arc::new(NoopEmbeddingHost));
+    let memory = tinymemory_core::store::UnifiedMemory::new(workspace, embedder, None)
+        .expect("open the workspace store");
+    let client = Arc::new(tinymemory_core::store::MemoryClient::from_unified_memory(
+        memory,
+    ));
+    TinycortexProvider::new(
+        "tinycortex".into(),
+        provider_config(workspace, serde_json::Value::Null),
+        client,
+    )
+}
+
+/// tinymemory#138: a connector pass hands the sink hundreds of small items, and
+/// each one used to pay its own embedding round-trip — about 1.7 s per item
+/// against the managed embedder, so a 500-item pass ran into the host's
+/// 15-minute slow-call deadline. The batch must share requests across items.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_items_are_embedded_together_rather_than_one_request_per_item() {
+    use tinymemory_api::provider::types::SourceItem;
+    use tinymemory_api::provider::MemoryProvider;
+    use tinymemory_api::types::MemoryTaint;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let embedder = Arc::new(RequestCountingEmbedder {
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let provider = provider_with_embedder(workspace.path(), Arc::clone(&embedder));
+    let config = provider_config(workspace.path(), serde_json::Value::Null);
+    let source = provider.as_sources().expect("SourceSink");
+
+    let items: Vec<SourceItem> = (1..=5)
+        .map(|n| SourceItem {
+            item_id: format!("msg-{n}"),
+            title: format!("Message {n}"),
+            content: format!("Short message number {n} about the roadmap."),
+            mime: Some("text/plain".into()),
+            url: None,
+            updated_at_ms: Some(n),
+            tags: vec!["gmail".into()],
+        })
+        .collect();
+    let outcome = source
+        .accept_source_items("gmail:conn-1", "composio", items, MemoryTaint::ExternalSync)
+        .await
+        .expect("accept the batch");
+    assert_eq!(outcome.written, 5);
+    assert_eq!(outcome.ids.len(), 5, "one id per written item, in order");
+
+    let requests = embedder.requests.lock().expect("requests lock").clone();
+    assert_eq!(
+        requests,
+        vec![5],
+        "five one-chunk items must cost ONE embedding request, not five (tinymemory#138); \
+         got {requests:?}"
+    );
+    // The tree funnel still runs once per written item (openhuman#6007).
+    assert_eq!(
+        tinymemory_core::store::chunks::count_chunks(&config).expect("count chunks"),
+        5,
+        "every written item must still reach the memory tree"
+    );
+}
+
+/// The batch keeps the sink's per-item accounting: an item the sink rejects
+/// fails the call, after the items before it were written and none after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blank_source_item_id_fails_the_batch_after_the_items_before_it() {
+    use tinymemory_api::error::MemoryError;
+    use tinymemory_api::provider::types::SourceItem;
+    use tinymemory_api::provider::MemoryProvider;
+    use tinymemory_api::types::MemoryTaint;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let provider = provider_over(workspace.path());
+    let source = provider.as_sources().expect("SourceSink");
+    let item = |id: &str| SourceItem {
+        item_id: id.into(),
+        title: "Item".into(),
+        content: "body".into(),
+        mime: None,
+        url: None,
+        updated_at_ms: None,
+        tags: Vec::new(),
+    };
+
+    let error = source
+        .accept_source_items(
+            "drive-1",
+            "drive",
+            vec![item("a"), item("b"), item("   "), item("d")],
+            MemoryTaint::ExternalSync,
+        )
+        .await
+        .expect_err("a blank item id must fail the call");
+    assert!(
+        matches!(&error, MemoryError::Invalid(message) if message.contains("item_id must not be empty")),
+        "got {error:?}"
+    );
+
+    let documents = provider.as_documents().expect("Documents");
+    let listed = documents
+        .list_documents(Some("source:drive-1"))
+        .await
+        .expect("list documents");
+    assert_eq!(
+        listed["count"].as_u64(),
+        Some(2),
+        "the items before the blank one are written; the ones after it are not"
+    );
+}

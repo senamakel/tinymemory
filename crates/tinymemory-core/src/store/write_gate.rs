@@ -18,7 +18,8 @@
 //! `upsert_document_metadata_only` as inherent methods on `UnifiedMemory` with
 //! the **same names and signatures they always had**, so every existing caller
 //! is routed through the gate without a single call-site edit — which is also
-//! what makes the "no bypass" claim below checkable rather than hopeful.
+//! what makes the "no bypass" claim below checkable rather than hopeful. The
+//! batch form, `upsert_documents`, is declared here for the same reason.
 //!
 //! # The gate, in order
 //!
@@ -45,12 +46,14 @@
 //!
 //! # No bypass
 //!
-//! `upsert_document_presanitized` / `upsert_document_metadata_only_presanitized`
-//! are `pub(crate)` and newly named, and this module holds their only call
-//! sites — verify with:
+//! `upsert_document_presanitized` / `upsert_documents_presanitized` /
+//! `upsert_document_metadata_only_presanitized` are `pub(crate)` and newly
+//! named, and this module holds their only call sites outside `documents.rs`
+//! itself (where the one-document method is the one-element case of the batch
+//! one) — verify with:
 //!
 //! ```text
-//! rg 'upsert_document(_metadata_only)?_presanitized' src/
+//! rg 'upsert_documents?(_metadata_only)?_presanitized' src/
 //! ```
 //!
 //! Every other writer in the tree (`Memory::store_with_taint`, `MemoryClient`,
@@ -140,6 +143,48 @@ impl UnifiedMemory {
             GateOutcome::Reject(err) => Err(err),
             GateOutcome::Admit(input) => self.upsert_document_presanitized(*input).await,
         }
+    }
+
+    /// Insert or update many documents, applying the host secret/PII write
+    /// gate to each and embedding their chunks together — one provider request
+    /// per bounded group of chunk texts across the batch rather than one per
+    /// document (tinymemory#138).
+    ///
+    /// Inputs are gated in order and the admitted prefix is written by
+    /// `Self::upsert_documents_presanitized`, which stops at the first write
+    /// failure; the first gate rejection, if any, ends the batch the same way.
+    /// The result holds one entry per document attempted, in input order, so a
+    /// failure is always the last entry and every document before it was
+    /// written.
+    ///
+    /// # Errors
+    ///
+    /// Per document, the same failure modes as [`Self::upsert_document`].
+    pub async fn upsert_documents(
+        &self,
+        inputs: Vec<NamespaceDocumentInput>,
+    ) -> Vec<Result<String, String>> {
+        let mut admitted = Vec::with_capacity(inputs.len());
+        let mut rejection = None;
+        for input in inputs {
+            match gate(input, "document") {
+                GateOutcome::Admit(input) => admitted.push(*input),
+                GateOutcome::Reject(err) => {
+                    rejection = Some(err);
+                    break;
+                }
+            }
+        }
+        let mut results = self.upsert_documents_presanitized(admitted).await;
+        if let Some(err) = rejection {
+            // Only when the admitted prefix was written in full: a write failure
+            // in it is already the batch's last entry, and everything after a
+            // failure — the rejected document included — stays unattempted.
+            if results.iter().all(Result::is_ok) {
+                results.push(Err(err));
+            }
+        }
+        results
     }
 
     /// Store a document without chunking, embedding, or graph extraction,

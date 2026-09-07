@@ -186,6 +186,35 @@ impl MemoryClient {
         Ok(document_id)
     }
 
+    /// Store many documents at once — the batch form of [`Self::put_doc`].
+    ///
+    /// The documents' chunks are embedded together, one provider request per
+    /// bounded group of chunk texts across the whole batch, instead of one
+    /// request per document (tinymemory#138). Each document is still gated,
+    /// written and queued for background graph extraction exactly as
+    /// `put_doc` does it.
+    ///
+    /// Documents are written in order and the first failure ends the batch:
+    /// the result holds one entry per document attempted, in input order, so a
+    /// failure is always the last entry and every document before it was
+    /// written and queued.
+    pub async fn put_docs(
+        &self,
+        inputs: Vec<NamespaceDocumentInput>,
+    ) -> Vec<Result<String, String>> {
+        let results = self.inner.upsert_documents(inputs.clone()).await;
+        for (document, result) in inputs.into_iter().zip(&results) {
+            if let Ok(document_id) = result {
+                self.ingestion_queue.submit(IngestionJob {
+                    document_id: document_id.clone(),
+                    document,
+                    config: MemoryIngestionConfig::default(),
+                });
+            }
+        }
+        results
+    }
+
     /// Store a document (DB row + markdown file) without vector embedding or
     /// graph extraction. Use this for high-frequency, ephemeral writes where
     /// the full pipeline would be too expensive (e.g. transient sync

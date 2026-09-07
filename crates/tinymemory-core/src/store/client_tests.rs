@@ -379,3 +379,44 @@ async fn ingest_doc_completes_and_stores_document() {
     // is exercised (no panic).
     let _ = result;
 }
+
+#[tokio::test]
+async fn put_docs_writes_every_document_and_returns_ids_in_order() {
+    let (_tmp, client) = make_client();
+    let results = client
+        .put_docs(vec![
+            doc("batch", "k1", "one"),
+            doc("batch", "k2", "two"),
+            doc("batch", "k3", "three"),
+        ])
+        .await;
+
+    let ids: Vec<String> = results
+        .into_iter()
+        .map(|result| result.expect("each document is written"))
+        .collect();
+    assert_eq!(ids.len(), 3);
+
+    let listed = client.list_documents(Some("batch")).await.unwrap();
+    assert_eq!(listed["count"].as_u64(), Some(3));
+    let by_key: std::collections::BTreeMap<String, String> = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|document| {
+            (
+                document["key"].as_str().unwrap().to_string(),
+                document["documentId"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            by_key["k1"].clone(),
+            by_key["k2"].clone(),
+            by_key["k3"].clone()
+        ],
+        "ids come back in input order"
+    );
+}

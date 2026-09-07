@@ -2198,11 +2198,25 @@ impl MemorySourceSink for TinycortexProvider {
         // Resolved once: whether a source's items belong in the memory tree is a
         // property of the source, not of the item.
         let tree_scope = connector_tree_scope(source_kind, source_id);
+
+        // Convert every item up front so the store can embed the whole batch
+        // together (tinymemory#138): `put_docs` pays one embedding round-trip
+        // per bounded group of chunk texts across ALL the items instead of one
+        // per item, which is what put a 500-item connector pass at ~15 minutes
+        // and over the host's slow-call deadline. An item that cannot be
+        // converted (a blank id, a shape the store rejects) ends the conversion
+        // where it stands: the items before it are still written and treed
+        // below, then its error is returned — the same end state as when each
+        // item was written as it was reached.
+        let mut inputs = Vec::with_capacity(items_len);
+        let mut tree_items = Vec::with_capacity(items_len);
+        let mut rejected = None;
         for item in items {
             if item.item_id.trim().is_empty() {
-                return Err(MemoryError::Invalid(
+                rejected = Some(MemoryError::Invalid(
                     "source item_id must not be empty".to_string(),
                 ));
+                break;
             }
             let title = if item.title.trim().is_empty() {
                 item.item_id.clone()
@@ -2235,8 +2249,25 @@ impl MemorySourceSink for TinycortexProvider {
                 document_id: None,
                 taint,
             };
-            let input = Self::cross(&input, "convert source document")?;
-            match self.client.put_doc(input).await {
+            match Self::cross(&input, "convert source document") {
+                Ok(input) => {
+                    inputs.push(input);
+                    tree_items.push(tree_item);
+                }
+                Err(error) => {
+                    rejected = Some(error);
+                    break;
+                }
+            }
+        }
+
+        // One store call for the whole batch. Its result holds one entry per
+        // document attempted, in order, with a failed write always last, so
+        // walking it in order keeps exactly the per-item accounting the old
+        // one-write-per-item loop had.
+        let results = self.client.put_docs(inputs).await;
+        for (result, tree_item) in results.into_iter().zip(tree_items) {
+            match result {
                 Ok(id) => {
                     outcome.written = outcome.written.saturating_add(1);
                     outcome.ids.push(id);
@@ -2296,7 +2327,10 @@ impl MemorySourceSink for TinycortexProvider {
                 }
             }
         }
-        Ok(outcome)
+        match rejected {
+            Some(error) => Err(error),
+            None => Ok(outcome),
+        }
     }
 
     async fn forget_source(&self, source_id: &str) -> Result<u64, MemoryError> {

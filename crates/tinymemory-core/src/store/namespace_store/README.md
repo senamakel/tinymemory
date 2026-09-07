@@ -11,7 +11,7 @@ tier; this directory is intentionally not migration staging.
 
 - **`mod.rs`** — declares the `UnifiedMemory` struct (connection + paths + embedder) and wires the submodules.
 - **`init.rs`** — constructor, `CREATE TABLE` bootstrap (docs, kv, graph, vector chunks, episodic FTS5, segments, events, profile), idempotent legacy-namespace migrations, plus path / namespace helpers (`sanitize_namespace`, `now_ts`, `namespace_dir`).
-- **`documents.rs`** — `memory_docs` CRUD: `upsert_document` (chunks + embeds + writes markdown sidecar), `upsert_document_metadata_only` (light path), `list_documents`, `list_namespaces`, `delete_document`, `clear_namespace`.
+- **`documents.rs`** — `memory_docs` CRUD: `upsert_document` (chunks + embeds + writes markdown sidecar), `upsert_documents` (the batch form: one embedding request per `EMBED_REQUEST_MAX_TEXTS` chunk texts across all the documents, then one transaction per document — tinymemory#138), `upsert_document_metadata_only` (light path), `list_documents`, `list_namespaces`, `delete_document`, `clear_namespace`.
 - **`kv.rs`** — global and namespace-scoped get/set/delete/list against `kv_global` / `kv_namespace`.
 - **`../../safety/`** — secret redaction/validation helpers. Document, KV, and episodic writes sanitize credentials before persistence and emit `[memory:safety]` diagnostics when a payload is rewritten.
 
