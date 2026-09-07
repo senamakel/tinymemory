@@ -361,15 +361,17 @@ TinyMemory's exact namespace/key CRUD and portability contract:
 ```rust,no_run
 use tinymemory::remote::{Capture, CaptureKind, LivingBrain};
 
-let brain = LivingBrain::cloud("lbk_...", "host-subject-id", "brain-id")?;
-let receipt = brain.capture(&Capture {
-    kind: CaptureKind::Note,
-    content: Some("Customer prefers concise weekly updates.".into()),
-    fetch_url: None,
-    origin_ref: Some("crm:customer-42:note-9".into()),
-    label: Some("CRM note".into()),
-}).await?;
-# Ok::<_, anyhow::Error>(receipt)
+async fn capture_note() -> anyhow::Result<()> {
+    let brain = LivingBrain::cloud("lbk_...", "host-subject-id", "brain-id")?;
+    let _receipt = brain.capture(&Capture {
+        kind: CaptureKind::Note,
+        content: Some("Customer prefers concise weekly updates.".into()),
+        fetch_url: None,
+        origin_ref: Some("crm:customer-42:note-9".into()),
+        label: Some("CRM note".into()),
+    }).await?;
+    Ok(())
+}
 ```
 
 Pass credentials from the host's secret store; never commit them. Every request

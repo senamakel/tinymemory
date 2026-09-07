@@ -4,6 +4,12 @@
 
 use super::{credential_header, Auth, HttpClient};
 
+impl HttpClient {
+    fn test_new(endpoint: &str, auth: Auth) -> anyhow::Result<Self> {
+        Self::new_with_subject(endpoint, auth, None)
+    }
+}
+
 /// The point of the helper. `reqwest` only redacts a header value whose
 /// sensitive flag is set, and `RequestBuilder::header` handed a plain
 /// string leaves it clear -- which is how an API key ends up rendered in
@@ -48,7 +54,7 @@ fn both_manual_schemes_send_a_sensitive_authorization_value() {
         Auth::ApiKey("cg-secret".into()),
         Auth::Token("m0-secret".into()),
     ] {
-        let client = HttpClient::new("https://example.test", auth).expect("valid endpoint");
+        let client = HttpClient::test_new("https://example.test", auth).expect("valid endpoint");
         let request = client
             .request(reqwest::Method::GET, "v1/thing")
             .expect("a plain key builds")

@@ -76,7 +76,7 @@ example `LIVINGBRAIN_API_KEY`, and pass the value at construction.
 | `capture_batch` | `POST /v1/brains/{brainId}/captures/batch` | Submit a bounded batch and return the service's per-source outcome. |
 | `capture_chat_turn` | `POST /v1/brains/{brainId}/captures/chat-turn` | Return LivingBrain's `worthy` decision; a not-worthy turn is a successful result, not an error. |
 | `search` | `POST /v1/brains/{brainId}/search` | Return native page-search results, including `similarity`, page state, summary, and slug. |
-| `page` / `pages` | `GET /v1/brains/{brainId}/pages/{slug}` / `pages` | Read the native page model; do not invent a namespace/key translation. |
+| `page` / `pages` | `GET /v1/brains/{brainId}/pages/{slug}` / `GET /v1/brains/{brainId}/pages` | Read the native page model; do not invent a namespace/key translation. |
 | `graph` | `GET /v1/brains/{brainId}/graph` | Return the service's graph payload intact enough to render or inspect connections. |
 | `sources` | `GET /v1/brains/{brainId}/sources` | Expose ingest status so callers can observe asynchronous capture completion. |
 | `remove_source` | `DELETE /v1/brains/{brainId}/sources/{sourceId}` | Remove a caller-created temporary ingest source, including after a live integration test. |
@@ -86,7 +86,8 @@ example `LIVINGBRAIN_API_KEY`, and pass the value at construction.
 capture kind needs input. `originRef` is the service's deduplication key and
 must be stable for retries of the same host event. The adapter must not retry a
 capture with a newly generated `originRef`, because that converts a retry into
-a duplicate ingestion.
+a duplicate ingestion. A batch is limited to 100 captures, each with a stable
+`originRef`, and returns its per-source outcomes.
 
 ### Capability boundary
 

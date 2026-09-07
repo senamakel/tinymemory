@@ -80,12 +80,53 @@ impl LivingBrain {
     /// rejects or cannot accept it.
     pub async fn capture(&self, capture: &Capture) -> anyhow::Result<CaptureReceipt> {
         capture.validate()?;
+        let attempts = if capture.origin_ref.is_some() {
+            Attempts::RetryTransient
+        } else {
+            Attempts::Once
+        };
         self.client
             .json(
                 Method::POST,
                 &format!("v1/brains/{}/captures", self.brain_id),
                 Some(&capture.to_json()),
-                Attempts::Once,
+                attempts,
+            )
+            .await
+    }
+
+    /// Submits a bounded batch of captures for asynchronous ingestion.
+    ///
+    /// Every capture needs a stable `origin_ref`, so a transient retry cannot
+    /// create duplicate sources.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the batch is empty, exceeds the service limit,
+    /// contains an invalid capture, or the service rejects it.
+    pub async fn capture_batch(&self, captures: &[Capture]) -> anyhow::Result<CaptureBatchReceipt> {
+        const MAX_BATCH_SIZE: usize = 100;
+        anyhow::ensure!(
+            !captures.is_empty(),
+            "LivingBrain capture batch must not be empty"
+        );
+        anyhow::ensure!(
+            captures.len() <= MAX_BATCH_SIZE,
+            "LivingBrain capture batch must contain at most {MAX_BATCH_SIZE} captures"
+        );
+        for capture in captures {
+            capture.validate()?;
+            anyhow::ensure!(
+                capture.origin_ref.is_some(),
+                "LivingBrain batch captures require an origin_ref"
+            );
+        }
+        self.client
+            .json(
+                Method::POST,
+                &format!("v1/brains/{}/captures/batch", self.brain_id),
+                Some(&json!({ "captures": captures.iter().map(Capture::to_json).collect::<Vec<_>>() })),
+                Attempts::RetryTransient,
             )
             .await
     }
@@ -161,6 +202,25 @@ impl LivingBrain {
             .json(
                 Method::GET,
                 &format!("v1/brains/{}/pages/{slug}", self.brain_id),
+                None,
+                Attempts::RetryTransient,
+            )
+            .await
+    }
+
+    /// Lists the native LivingBrain pages for the configured brain.
+    ///
+    /// Page fields are intentionally kept as JSON because LivingBrain evolves
+    /// this model independently of TinyMemory's exact-record contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the service cannot list the pages.
+    pub async fn pages(&self) -> anyhow::Result<Value> {
+        self.client
+            .json(
+                Method::GET,
+                &format!("v1/brains/{}/pages", self.brain_id),
                 None,
                 Attempts::RetryTransient,
             )
@@ -245,6 +305,10 @@ impl LivingBrain {
 /// separators would be an input bug, not a compatibility feature.
 fn validate_path_segment(value: &str, name: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!value.trim().is_empty(), "{name} must not be empty");
+    anyhow::ensure!(
+        !matches!(value, "." | ".."),
+        "{name} must not be a dot path segment"
+    );
     anyhow::ensure!(
         value
             .bytes()
@@ -409,6 +473,13 @@ pub struct CaptureReceipt {
     /// Native ingestion status, when returned by the endpoint.
     #[serde(default)]
     pub status: Option<String>,
+}
+
+/// Per-source outcomes returned from a batch capture submission.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CaptureBatchReceipt {
+    /// The individual sources accepted or rejected by the service.
+    pub items: Vec<CaptureReceipt>,
 }
 
 /// A captured source and its current asynchronous-ingestion state.

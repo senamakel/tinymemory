@@ -46,6 +46,20 @@ async fn capture(
     )
 }
 
+async fn capture_batch(headers: HeaderMap, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"message": "missing auth"})),
+        );
+    }
+    assert_eq!(body["captures"][0]["originRef"], "event:batch-1");
+    (
+        StatusCode::CREATED,
+        Json(json!({"items": [{"id": "source-batch-1", "status": "queued"}]})),
+    )
+}
+
 async fn search(headers: HeaderMap, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
     if !authorized(&headers) {
         return (
@@ -93,6 +107,19 @@ async fn page(headers: HeaderMap) -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
         Json(json!({"slug": "customer-preferences", "content": "..."})),
+    )
+}
+
+async fn pages(headers: HeaderMap) -> (StatusCode, Json<Value>) {
+    if !authorized(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"message": "missing auth"})),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({"items": [{"slug": "customer-preferences"}]})),
     )
 }
 
@@ -149,9 +176,11 @@ async fn simulated_client() -> (LivingBrain, Arc<ApiState>) {
     let state = Arc::new(ApiState::default());
     let app = Router::new()
         .route("/v1/brains/brain-1/captures", post(capture))
+        .route("/v1/brains/brain-1/captures/batch", post(capture_batch))
         .route("/v1/brains/brain-1/captures/chat-turn", post(chat_turn))
         .route("/v1/brains/brain-1/search", post(search))
         .route("/v1/brains/brain-1/pages/customer-preferences", get(page))
+        .route("/v1/brains/brain-1/pages", get(pages))
         .route("/v1/brains/brain-1/graph", get(graph))
         .route("/v1/brains/brain-1/sources", get(sources))
         .route("/v1/brains/brain-1/export/markdown", get(export))
@@ -191,6 +220,23 @@ async fn simulated_api_carries_required_headers_and_native_payloads() {
         state.captured.lock().expect("state lock")[0]["originRef"],
         "event:123"
     );
+    let batch = client
+        .capture_batch(&[Capture {
+            kind: CaptureKind::Note,
+            content: Some("A durable batch note".into()),
+            fetch_url: None,
+            origin_ref: Some("event:batch-1".into()),
+            label: None,
+        }])
+        .await
+        .expect("capture batch");
+    assert_eq!(batch.items[0].id, "source-batch-1");
+    assert!(client
+        .capture_batch(&[])
+        .await
+        .expect_err("empty batch must be rejected")
+        .to_string()
+        .contains("must not be empty"));
 
     let results = client
         .search("customer preferences", 3, Some(0.5))
@@ -200,6 +246,10 @@ async fn simulated_api_carries_required_headers_and_native_payloads() {
     assert_eq!(
         client.page("customer-preferences").await.expect("page")["content"],
         "..."
+    );
+    assert_eq!(
+        client.pages().await.expect("pages")["items"][0]["slug"],
+        "customer-preferences"
     );
     assert_eq!(
         client.graph().await.expect("graph")["nodes"][0]["id"],
@@ -247,4 +297,8 @@ fn connection_fields_and_capture_shape_are_checked_without_a_request() {
         label: None,
     };
     assert!(invalid.validate().is_err());
+    for segment in [".", ".."] {
+        let error = LivingBrain::cloud("test-key", "subject", segment).expect_err("dot segment");
+        assert!(format!("{error}").contains("dot path segment"));
+    }
 }

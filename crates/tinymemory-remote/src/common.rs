@@ -219,12 +219,6 @@ impl HttpClient {
     }
 
     /// Validates and normalizes an endpoint before constructing the transport.
-    #[cfg(test)]
-    fn new(endpoint: &str, auth: Auth) -> anyhow::Result<Self> {
-        Self::new_with_subject(endpoint, auth, None)
-    }
-
-    /// Validates and normalizes an endpoint before constructing the transport.
     fn new_with_subject(
         endpoint: &str,
         auth: Auth,

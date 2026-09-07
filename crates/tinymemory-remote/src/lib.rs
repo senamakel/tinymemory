@@ -23,8 +23,9 @@ pub use cognee::{CogneeMemory, COGNEE_DRIVER_ID};
 pub use cognee_graph::CogneeGraph;
 pub use graph_provider::GraphMemoryProvider;
 pub use livingbrain::{
-    Capture, CaptureKind, CaptureReceipt, CaptureSource, ChatSender, ChatTurn, ChatTurnReceipt,
-    LivingBrain, LivingBrainExport, LivingBrainSearchResult, LIVINGBRAIN_API_ENDPOINT,
+    Capture, CaptureBatchReceipt, CaptureKind, CaptureReceipt, CaptureSource, ChatSender, ChatTurn,
+    ChatTurnReceipt, LivingBrain, LivingBrainExport, LivingBrainSearchResult,
+    LIVINGBRAIN_API_ENDPOINT,
 };
 pub use mem0::{Mem0Memory, MEM0_API_ENDPOINT, MEM0_DRIVER_ID};
 pub use mem0_graph::Mem0Graph;

@@ -99,7 +99,7 @@ livingbrain = ["dep:tinymemory-remote"]
 # Every engine at once. A host that binds its driver from configuration rather
 # than at compile time wants this: `DriverRegistry` admission is a static policy
 # table, so which adapters are compiled in decides what it can actually bind.
-engines = ["tinycortex", "supermemory", "mem0", "cognee", "agentmemory", "livingbrain"]
+engines = ["tinycortex", "supermemory", "mem0", "cognee", "agentmemory"]
 
 # --- Subsystems ------------------------------------------------------------
 # The workspace crates that are not adapters, each re-exported as a module of
