@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,6 +22,7 @@ pub(crate) struct HttpClient {
     inner: reqwest::Client,
     endpoint: Url,
     auth: Auth,
+    subject_id: Option<HeaderValue>,
 }
 
 #[derive(Clone)]
@@ -145,6 +146,13 @@ fn credential_header(value: &str) -> anyhow::Result<HeaderValue> {
     Ok(header)
 }
 
+/// Validates LivingBrain's caller-controlled subject identifier before it is
+/// placed in a request header. It is not a credential, but it must still not
+/// be allowed to inject another header or to drift into a transport failure.
+fn subject_header(value: &str) -> anyhow::Result<HeaderValue> {
+    HeaderValue::from_str(value).context("subject id is not a valid HTTP header value")
+}
+
 /// The caller's statement of a request's idempotence — every `json`/`text`
 /// call site must choose, which is what makes the read/write retry split
 /// CHECKABLE instead of conventional (#68 review, Major 4: the first cut's
@@ -171,30 +179,57 @@ pub(crate) enum Attempts {
 impl HttpClient {
     /// Builds a client that optionally authenticates with a bearer token.
     pub(crate) fn bearer(endpoint: &str, credential: Option<&str>) -> anyhow::Result<Self> {
-        Self::new(
+        Self::new_with_subject(
             endpoint,
             credential.map_or(Auth::None, |value| Auth::Bearer(value.into())),
+            None,
+        )
+    }
+
+    /// Builds a bearer-authenticated client that identifies every request's
+    /// end user with LivingBrain's required `x-subject-id` header.
+    pub(crate) fn bearer_with_subject(
+        endpoint: &str,
+        credential: &str,
+        subject_id: &str,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_subject(
+            endpoint,
+            Auth::Bearer(credential.into()),
+            Some(subject_header(subject_id)?),
         )
     }
 
     /// A client authenticating with `Authorization: Token <key>`.
     pub(crate) fn token(endpoint: &str, credential: Option<&str>) -> anyhow::Result<Self> {
-        Self::new(
+        Self::new_with_subject(
             endpoint,
             credential.map_or(Auth::None, |value| Auth::Token(value.into())),
+            None,
         )
     }
 
     /// Builds a client that optionally authenticates with `X-API-Key`.
     pub(crate) fn api_key(endpoint: &str, credential: Option<&str>) -> anyhow::Result<Self> {
-        Self::new(
+        Self::new_with_subject(
             endpoint,
             credential.map_or(Auth::None, |value| Auth::ApiKey(value.into())),
+            None,
         )
     }
 
     /// Validates and normalizes an endpoint before constructing the transport.
+    #[cfg(test)]
     fn new(endpoint: &str, auth: Auth) -> anyhow::Result<Self> {
+        Self::new_with_subject(endpoint, auth, None)
+    }
+
+    /// Validates and normalizes an endpoint before constructing the transport.
+    fn new_with_subject(
+        endpoint: &str,
+        auth: Auth,
+        subject_id: Option<HeaderValue>,
+    ) -> anyhow::Result<Self> {
         let mut endpoint = Url::parse(endpoint).context("memory endpoint is not a valid URL")?;
         if !matches!(endpoint.scheme(), "http" | "https") {
             bail!("memory endpoint must use http or https");
@@ -207,6 +242,7 @@ impl HttpClient {
             inner: Self::build_inner(std::time::Duration::from_secs(60))?,
             endpoint,
             auth,
+            subject_id,
         })
     }
 
@@ -240,13 +276,19 @@ impl HttpClient {
             .join(path.trim_start_matches('/'))
             .context("memory API path is invalid")?;
         let request = self.inner.request(method, url);
-        Ok(match &self.auth {
+        let request = match &self.auth {
             Auth::None => request,
             Auth::Bearer(token) => request.bearer_auth(token),
             Auth::ApiKey(key) => request.header("X-API-Key", credential_header(key)?),
             Auth::Token(key) => {
                 request.header(AUTHORIZATION, credential_header(&format!("Token {key}"))?)
             }
+        };
+        Ok(match &self.subject_id {
+            Some(subject_id) => {
+                request.header(HeaderName::from_static("x-subject-id"), subject_id.clone())
+            }
+            None => request,
         })
     }
 

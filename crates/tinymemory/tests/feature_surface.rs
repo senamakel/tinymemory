@@ -24,7 +24,9 @@ compile_error!("contacts must imply core");
         feature = "tinycortex",
         feature = "supermemory",
         feature = "mem0",
-        feature = "cognee"
+        feature = "cognee",
+        feature = "agentmemory",
+        feature = "livingbrain"
     ))
 ))]
 compile_error!("engines must expose every engine adapter");

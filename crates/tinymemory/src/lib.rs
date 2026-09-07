@@ -98,7 +98,8 @@ pub use tinymemory_tinycortex as tinycortex;
     feature = "supermemory",
     feature = "mem0",
     feature = "cognee",
-    feature = "agentmemory"
+    feature = "agentmemory",
+    feature = "livingbrain"
 ))]
 pub use tinymemory_remote as remote;
 

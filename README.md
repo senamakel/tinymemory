@@ -78,6 +78,7 @@ composition — no storage engine, no HTTP stack, no native library.
 | --- | --- |
 | `tinycortex` | the embedded TinyCortex engine, as `tinymemory::tinycortex` |
 | `supermemory`, `mem0`, `cognee`, `agentmemory` | the matching HTTP adapter, as `tinymemory::remote` |
+| `livingbrain` | the LivingBrain Brain API client, as `tinymemory::remote` (not a `MemoryProvider`) |
 | `engines` | all five of the above |
 | `core` | `tinymemory::core` — the memory subsystem |
 | `sync` | `tinymemory::sync` — the Composio normalisers |
@@ -113,7 +114,7 @@ error.
 None of these crates are on crates.io yet, so you take the facade by git.
 Which patch table you need depends on the engine you pick.
 
-**Remote engines (Supermemory, Mem0, Cognee, AgentMemory) — no patch table:**
+**Remote engines and clients (Supermemory, Mem0, Cognee, AgentMemory, LivingBrain) — no patch table:**
 
 ```toml
 [dependencies]
@@ -350,6 +351,29 @@ transport errors, and from the request's own header rendering.
 All four advertise the mandatory Core, Recall, and Portability families. The
 live Docker harness and conformance command are documented in
 [`integration/remote-engines/`](integration/remote-engines/README.md).
+
+LivingBrain is different: its hosted API accepts asynchronous captures and
+returns compiled pages, native semantic search, graph data, and markdown
+exports. It is available behind `livingbrain`, but is intentionally a
+brain-scoped client rather than a `MemoryProvider`, because it cannot uphold
+TinyMemory's exact namespace/key CRUD and portability contract:
+
+```rust,no_run
+use tinymemory::remote::{Capture, CaptureKind, LivingBrain};
+
+let brain = LivingBrain::cloud("lbk_...", "host-subject-id", "brain-id")?;
+let receipt = brain.capture(&Capture {
+    kind: CaptureKind::Note,
+    content: Some("Customer prefers concise weekly updates.".into()),
+    fetch_url: None,
+    origin_ref: Some("crm:customer-42:note-9".into()),
+    label: Some("CRM note".into()),
+}).await?;
+# Ok::<_, anyhow::Error>(receipt)
+```
+
+Pass credentials from the host's secret store; never commit them. Every request
+uses both `Authorization: Bearer` and `x-subject-id`.
 
 One of them restricts what it will store. Supermemory removes `U+0000` and
 `U+FFFD` from content server-side, so the adapter refuses such content with
