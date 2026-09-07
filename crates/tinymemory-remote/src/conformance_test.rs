@@ -818,7 +818,19 @@ async fn cortex_recall(State(store): State<CortexStore>, Json(body): Json<Value>
     Json(json!({ "layers": { "events": hits } }))
 }
 
-async fn cortex_scopes(State(store): State<CortexStore>) -> Json<Value> {
+/// The real engine caps this listing at fifty unless `limit` says otherwise,
+/// and documents neither the cap nor the parameter — the response carries no
+/// cursor and no total, so a caller that does not ask cannot tell it was cut
+/// short. The double reproduces the cap, because a double that returns
+/// everything cannot catch the adapter forgetting to ask.
+async fn cortex_scopes(
+    State(store): State<CortexStore>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<usize>().ok())
+        .unwrap_or(50);
     let log = store.lock().expect("cortex log");
     let mut paths: Vec<String> = log
         .events
@@ -828,6 +840,7 @@ async fn cortex_scopes(State(store): State<CortexStore>) -> Json<Value> {
         .collect();
     paths.sort();
     paths.dedup();
+    paths.truncate(limit);
     Json(json!({
         "items": paths.into_iter().map(|p| json!({ "path": p })).collect::<Vec<_>>()
     }))
@@ -1205,5 +1218,91 @@ async fn a_replay_returns_the_event_its_own_key_created() {
         id_of(&replay_b),
         b,
         "key-b replayed with another key\'s event"
+    );
+}
+
+/// A namespace count above the engine's undocumented default must not be
+/// silently truncated.
+///
+/// `scopes` feeds `entries`, which feeds `namespace_summaries`, which feeds
+/// `export_page` and so `opencompany memory migrate`. Before this was fixed the
+/// adapter sent no `limit`, so a company with more than fifty namespaces
+/// migrated a subset of itself and the migration reported success. Per-namespace
+/// reads never notice, which is why it stayed invisible.
+#[tokio::test]
+async fn every_namespace_is_listed_past_the_engines_undocumented_default() {
+    let store: CortexStore = Arc::new(Mutex::new(CortexLog::default()));
+    let app = Router::new()
+        .route("/v1/experience", post(cortex_experience))
+        .route("/v1/events", get(cortex_events))
+        .route("/v1/forget", post(cortex_forget))
+        .route("/v1/recall", post(cortex_recall))
+        .route("/v1/scopes/list", get(cortex_scopes))
+        .route(
+            "/v1/admin/health",
+            get(|| async { Json(json!({ "status": "healthy" })) }),
+        )
+        .with_state(store);
+    let endpoint = serve(app).await;
+
+    let memory = CortexMemory::api(&endpoint, "test-key").expect("client");
+    // Comfortably past fifty, and past it by enough that an off-by-one in the
+    // cap would not pass by luck.
+    const NAMESPACES: usize = 64;
+    for n in 0..NAMESPACES {
+        memory
+            .store(
+                &format!("oc/acme-{n:032x}"),
+                "k",
+                "v",
+                MemoryCategory::Core,
+                None,
+            )
+            .await
+            .expect("store");
+    }
+
+    let summaries = memory.namespace_summaries().await.expect("summaries");
+    assert_eq!(
+        summaries.len(),
+        NAMESPACES,
+        "a migration reading this would have left {} namespaces behind without saying so",
+        NAMESPACES.saturating_sub(summaries.len())
+    );
+}
+
+/// A listing that exactly fills the limit is refused, not returned.
+///
+/// The engine sends no cursor, no `has_more` and no total, so a response
+/// holding as many entries as were asked for is indistinguishable from one that
+/// was cut short. Returning it would hand a caller a subset labelled as the
+/// whole, which is the failure this guard exists to prevent — better a loud
+/// error than a migration that quietly leaves namespaces behind.
+#[tokio::test]
+async fn a_scope_listing_that_fills_the_limit_is_refused_rather_than_trusted() {
+    // The engine's ceiling as the adapter asks for it. Kept as a literal on
+    // purpose: this test should fail loudly if `SCOPE_LIST_LIMIT` moves without
+    // someone reconsidering the guard.
+    const ASKED_FOR: usize = 10_000;
+    let app = Router::new().route(
+        "/v1/scopes/list",
+        get(|| async {
+            let items: Vec<Value> = (0..ASKED_FOR)
+                .map(|n| json!({ "path": format!("tenant:acme-{n}") }))
+                .collect();
+            Json(json!({ "items": items }))
+        }),
+    );
+    let endpoint = serve(app).await;
+
+    let memory = CortexMemory::api(&endpoint, "test-key").expect("client");
+    let error = memory
+        .namespace_summaries()
+        .await
+        .expect_err("a full page must not pass for a complete listing");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("truncated"),
+        "the error must say why the listing cannot be trusted, got: {rendered}"
     );
 }
