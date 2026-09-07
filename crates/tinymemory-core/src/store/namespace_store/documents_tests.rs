@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tempfile::TempDir;
 
+use super::EMBED_REQUEST_MAX_TEXTS;
 use crate::store::{NamespaceDocumentInput, UnifiedMemory};
 use tinymemory_api::host::NoopEmbedding;
 
@@ -34,6 +35,18 @@ fn count_vector_chunks(memory: &UnifiedMemory, namespace: &str, document_id: &st
     let conn = memory.conn.lock();
     conn.query_row(
         "SELECT COUNT(*) FROM vector_chunks WHERE namespace = ?1 AND document_id = ?2",
+        rusqlite::params![UnifiedMemory::sanitize_namespace(namespace), document_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// Like [`count_vector_chunks`], counting only the chunks that carry a vector.
+fn count_embedded_chunks(memory: &UnifiedMemory, namespace: &str, document_id: &str) -> i64 {
+    let conn = memory.conn.lock();
+    conn.query_row(
+        "SELECT COUNT(*) FROM vector_chunks
+          WHERE namespace = ?1 AND document_id = ?2 AND embedding IS NOT NULL",
         rusqlite::params![UnifiedMemory::sanitize_namespace(namespace), document_id],
         |row| row.get(0),
     )
@@ -419,6 +432,196 @@ async fn upsert_document_batch_embeds_all_chunks_in_one_call() {
         1,
         "all chunks must be embedded in a single batch call, not one call per chunk"
     );
+}
+
+/// Embedder that records the size of every request and can refuse one of them
+/// (by 0-based request index), so the batch path's request splitting and its
+/// per-request failure isolation are observable.
+struct RequestRecordingEmbedder {
+    requests: std::sync::Mutex<Vec<usize>>,
+    fail_request: Option<usize>,
+}
+
+impl RequestRecordingEmbedder {
+    fn new(fail_request: Option<usize>) -> Arc<Self> {
+        Arc::new(Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+            fail_request,
+        })
+    }
+
+    fn requests(&self) -> Vec<usize> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl tinymemory_api::host::EmbeddingProvider for RequestRecordingEmbedder {
+    fn name(&self) -> &str {
+        "recording"
+    }
+
+    fn model_id(&self) -> &str {
+        "recording-test"
+    }
+
+    fn dimensions(&self) -> usize {
+        3
+    }
+
+    async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let index = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(texts.len());
+            requests.len() - 1
+        };
+        if self.fail_request == Some(index) {
+            anyhow::bail!("provider refused request {index}");
+        }
+        Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
+    }
+}
+
+/// tinymemory#138: a batch of documents must share embedding requests rather
+/// than pay one round-trip per document.
+#[tokio::test]
+async fn upsert_documents_embeds_every_document_in_one_request() {
+    let tmp = TempDir::new().unwrap();
+    let embedder = RequestRecordingEmbedder::new(None);
+    let memory = UnifiedMemory::new(tmp.path(), embedder.clone(), None).unwrap();
+
+    // Each body chunks into several pieces, so the batch has many more chunks
+    // than documents — and still fits one request.
+    let long_body = "alpha ".repeat(400);
+    let inputs: Vec<NamespaceDocumentInput> = ["doc-a", "doc-b", "doc-c"]
+        .iter()
+        .map(|key| make_doc_input("test:batch-many", key, key, &long_body))
+        .collect();
+
+    let ids: Vec<String> = memory
+        .upsert_documents(inputs)
+        .await
+        .into_iter()
+        .map(|result| result.unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3);
+
+    let mut total_chunks = 0;
+    for id in &ids {
+        let chunks = count_vector_chunks(&memory, "test:batch-many", id);
+        assert!(
+            chunks >= 3,
+            "each body should chunk into >=3 pieces, got {chunks}"
+        );
+        assert_eq!(
+            count_embedded_chunks(&memory, "test:batch-many", id),
+            chunks,
+            "every chunk of every document must carry a vector"
+        );
+        total_chunks += chunks;
+    }
+    assert_eq!(
+        embedder.requests(),
+        vec![total_chunks as usize],
+        "three documents' chunks must travel in ONE provider request, not one per document"
+    );
+}
+
+#[tokio::test]
+async fn upsert_documents_splits_embedding_requests_at_the_request_cap() {
+    let tmp = TempDir::new().unwrap();
+    let embedder = RequestRecordingEmbedder::new(None);
+    let memory = UnifiedMemory::new(tmp.path(), embedder.clone(), None).unwrap();
+
+    // One chunk per document, one more document than a request may carry.
+    let inputs: Vec<NamespaceDocumentInput> = (0..=EMBED_REQUEST_MAX_TEXTS)
+        .map(|n| make_doc_input("test:cap", &format!("doc-{n}"), "Doc", &format!("body {n}")))
+        .collect();
+
+    let results = memory.upsert_documents(inputs).await;
+    assert_eq!(results.len(), EMBED_REQUEST_MAX_TEXTS + 1);
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(
+        embedder.requests(),
+        vec![EMBED_REQUEST_MAX_TEXTS, 1],
+        "chunk texts must be sent in requests of at most EMBED_REQUEST_MAX_TEXTS"
+    );
+}
+
+#[tokio::test]
+async fn upsert_documents_keeps_writing_when_one_embedding_request_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    // The second request (the lone overflow chunk) is refused.
+    let embedder = RequestRecordingEmbedder::new(Some(1));
+    let memory = UnifiedMemory::new(tmp.path(), embedder.clone(), None).unwrap();
+
+    let inputs: Vec<NamespaceDocumentInput> = (0..=EMBED_REQUEST_MAX_TEXTS)
+        .map(|n| {
+            make_doc_input(
+                "test:refused",
+                &format!("doc-{n}"),
+                "Doc",
+                &format!("body {n}"),
+            )
+        })
+        .collect();
+
+    let ids: Vec<String> = memory
+        .upsert_documents(inputs)
+        .await
+        .into_iter()
+        .map(|result| result.expect("an embedding failure is not a write failure"))
+        .collect();
+    assert_eq!(ids.len(), EMBED_REQUEST_MAX_TEXTS + 1);
+    assert_eq!(embedder.requests(), vec![EMBED_REQUEST_MAX_TEXTS, 1]);
+
+    let first = &ids[0];
+    assert_eq!(count_vector_chunks(&memory, "test:refused", first), 1);
+    assert_eq!(
+        count_embedded_chunks(&memory, "test:refused", first),
+        1,
+        "documents covered by the accepted request keep their vectors"
+    );
+    let last = ids.last().unwrap();
+    assert_eq!(
+        count_vector_chunks(&memory, "test:refused", last),
+        1,
+        "the document covered by the refused request is still written"
+    );
+    assert_eq!(
+        count_embedded_chunks(&memory, "test:refused", last),
+        0,
+        "…but its chunk is stored without a vector, like the single-document path"
+    );
+}
+
+#[tokio::test]
+async fn upsert_documents_stops_at_the_first_write_failure() {
+    let tmp = TempDir::new().unwrap();
+    let memory = UnifiedMemory::new(tmp.path(), Arc::new(NoopEmbedding), None).unwrap();
+
+    let results = memory
+        .upsert_documents(vec![
+            make_doc_input("test:stop", "doc-a", "Doc A", "A body"),
+            make_doc_input("test:stop", "   ", "Blank key", "rejected by the store"),
+            make_doc_input("test:stop", "doc-c", "Doc C", "never attempted"),
+        ])
+        .await;
+
+    assert_eq!(
+        results.len(),
+        2,
+        "the failing document is the last entry; nothing after it is attempted"
+    );
+    assert!(results[0].is_ok());
+    let err = results[1].as_ref().unwrap_err();
+    assert!(
+        err.contains("document key cannot be empty"),
+        "the failing entry carries the store's own error, got {err:?}"
+    );
+    let docs = memory.list_documents(Some("test:stop")).await.unwrap();
+    assert_eq!(docs["count"].as_u64(), Some(1));
+    assert_eq!(docs["documents"][0]["key"], "doc-a");
 }
 
 #[tokio::test]

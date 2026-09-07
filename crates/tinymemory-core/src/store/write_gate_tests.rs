@@ -174,3 +174,39 @@ async fn gate_canonicalizes_a_pii_like_key_and_keeps_the_row_addressable() {
         docs[0].key
     );
 }
+
+#[tokio::test]
+async fn gated_batch_upsert_redacts_each_document_and_stops_at_the_first_rejection() {
+    let (_tmp, memory) = fresh();
+
+    let mut secret_key = secret_doc("sk-1234567890123456789012345");
+    secret_key.namespace = "safe".to_string();
+    let results = memory
+        .upsert_documents(vec![
+            secret_doc("first"),
+            secret_key,
+            secret_doc("never-attempted"),
+        ])
+        .await;
+
+    assert_eq!(
+        results.len(),
+        2,
+        "the rejected document ends the batch as its last entry, got {results:?}"
+    );
+    assert!(results[0].is_ok(), "{results:?}");
+    let err = results[1].as_ref().unwrap_err();
+    assert!(
+        err.contains("cannot contain secrets"),
+        "secret-like key must be refused, got {err:?}"
+    );
+
+    let docs = memory.load_documents_for_scope("safe").await.unwrap();
+    assert_eq!(docs.len(), 1, "only the admitted prefix reaches storage");
+    assert_eq!(docs[0].key, "first");
+    assert!(
+        !docs[0].content.contains("BEGIN PRIVATE KEY"),
+        "a batched write must be redacted exactly like a single one, got {:?}",
+        docs[0].content
+    );
+}

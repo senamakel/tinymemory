@@ -1,8 +1,9 @@
 //! Document CRUD against the `memory_docs` table.
 //!
-//! Owns the upsert pipeline (with chunking + embedding), metadata-only writes
-//! for high-frequency callers, list/delete/clear-namespace operations, and the
-//! markdown sidecar files in `memory/namespaces/<ns>/docs/`.
+//! Owns the upsert pipeline (with chunking + embedding, batched across
+//! documents), metadata-only writes for high-frequency callers,
+//! list/delete/clear-namespace operations, and the markdown sidecar files in
+//! `memory/namespaces/<ns>/docs/`.
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -14,10 +15,28 @@ use crate::store::types::{NamespaceDocumentInput, StoredMemoryDocument, GLOBAL_N
 
 use super::UnifiedMemory;
 
+/// Token budget per vector chunk when a document is split for embedding.
+const DOCUMENT_CHUNK_MAX_TOKENS: usize = 225;
+
+/// Upper bound on chunk texts sent to the embedding provider in one request
+/// when a batch of documents is embedded together
+/// ([`UnifiedMemory::upsert_documents_presanitized`]).
+///
+/// Sized under every provider's per-request input cap (Cohere admits 96 texts,
+/// the others more) and, at [`DOCUMENT_CHUNK_MAX_TOKENS`] per chunk, roughly
+/// 14k tokens per request — under every provider's token budget — so a batch
+/// of any length becomes a handful of bounded requests rather than one a
+/// provider may refuse or time out. Still one to two orders of magnitude
+/// fewer round-trips than the one-per-document write path it replaces.
+pub(crate) const EMBED_REQUEST_MAX_TEXTS: usize = 64;
+
 impl UnifiedMemory {
     /// Insert or update a document by `(namespace, key)`. Writes the markdown
     /// sidecar, replaces vector chunks, and embeds them with the configured
     /// provider.
+    ///
+    /// The one-document case of [`Self::upsert_documents_presanitized`]; see it
+    /// for the write order and the failure contract.
     ///
     /// **Takes already-sanitized input.** The host secret/PII write gate runs
     /// in [`crate::store::write_gate`], which owns this
@@ -27,6 +46,115 @@ impl UnifiedMemory {
     pub(crate) async fn upsert_document_presanitized(
         &self,
         input: NamespaceDocumentInput,
+    ) -> Result<String, String> {
+        self.upsert_documents_presanitized(vec![input])
+            .await
+            .pop()
+            .unwrap_or_else(|| Err("document upsert produced no result".to_string()))
+    }
+
+    /// Insert or update many documents, embedding their chunks **together**:
+    /// one provider request per [`EMBED_REQUEST_MAX_TEXTS`] chunk texts across
+    /// the whole batch rather than one request per document (tinymemory#138).
+    /// A connector pass of several hundred small items used to pay one
+    /// embedding round-trip each; here it pays one per bounded group of texts.
+    ///
+    /// Order of operations: every document is chunked, every chunk text is
+    /// embedded (see [`Self::embed_chunk_texts`]), then the documents are
+    /// written one at a time in input order — each under its own per-key write
+    /// lock, with the row, the chunk replacement and the new vectors in ONE
+    /// transaction, so a reader never sees a row whose chunks are still being
+    /// replaced.
+    ///
+    /// The first document whose write fails ends the batch: the result holds
+    /// one entry per document attempted, in input order, with that failure as
+    /// its last entry, and the documents after it are left untouched. An
+    /// embedding failure is not a write failure — a request the provider
+    /// refuses leaves the chunks it covered vector-less (keyword-searchable and
+    /// re-embeddable), exactly as the single-document path always has, and the
+    /// batch carries on.
+    ///
+    /// **Takes already-sanitized input** — same contract as
+    /// [`Self::upsert_document_presanitized`]; go through
+    /// `UnifiedMemory::upsert_documents` instead.
+    pub(crate) async fn upsert_documents_presanitized(
+        &self,
+        inputs: Vec<NamespaceDocumentInput>,
+    ) -> Vec<Result<String, String>> {
+        let chunked: Vec<Vec<String>> = inputs
+            .iter()
+            .map(|input| Self::chunk_document_content(&input.content, DOCUMENT_CHUNK_MAX_TOKENS))
+            .collect();
+        let texts: Vec<&str> = chunked.iter().flatten().map(String::as_str).collect();
+        let mut vectors = self.embed_chunk_texts(&texts).await.into_iter();
+
+        let mut results = Vec::with_capacity(inputs.len());
+        for (input, chunks) in inputs.into_iter().zip(chunked) {
+            // `embed_chunk_texts` yields exactly one slot per text, in order,
+            // so the next `chunks.len()` slots are this document's.
+            let embeddings: Vec<Option<Vec<f32>>> = vectors.by_ref().take(chunks.len()).collect();
+            let result = self
+                .write_document_presanitized(input, chunks, embeddings)
+                .await;
+            let failed = result.is_err();
+            results.push(result);
+            if failed {
+                break;
+            }
+        }
+        results
+    }
+
+    /// Embed `texts` in requests of at most [`EMBED_REQUEST_MAX_TEXTS`],
+    /// returning one slot per input position.
+    ///
+    /// Failure handling keeps the per-chunk resilience the single-document
+    /// path always had:
+    ///   * a request the provider refuses leaves every position it covered
+    ///     `None` — logged, not propagated, because a vector-less chunk is
+    ///     still keyword-searchable and re-embeddable while a failed write is
+    ///     lost;
+    ///   * a provider that returns fewer vectors than texts, or an empty vector
+    ///     for a position (`NoopEmbedding`, NaN recovery), leaves those
+    ///     positions `None` by position.
+    async fn embed_chunk_texts(&self, texts: &[&str]) -> Vec<Option<Vec<f32>>> {
+        let mut out: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
+        for request in texts.chunks(EMBED_REQUEST_MAX_TEXTS) {
+            log::debug!(
+                "[memory] batch-embedding {} chunk text(s) in one request",
+                request.len()
+            );
+            match self.embedder.embed(request).await {
+                Ok(vectors) => {
+                    let mut vectors = vectors
+                        .into_iter()
+                        .map(|vector| (!vector.is_empty()).then_some(vector));
+                    out.extend(request.iter().map(|_| vectors.next().flatten()));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[memory] batch embed failed for {} chunk text(s); storing them without vectors: {e}",
+                        request.len()
+                    );
+                    out.resize(out.len() + request.len(), None);
+                }
+            }
+        }
+        out
+    }
+
+    /// Persist one document whose chunks and vectors were computed up front.
+    ///
+    /// Under the per-key write lock: resolve the document id and `created_at`,
+    /// write the markdown sidecar, then commit the `memory_docs` row, the chunk
+    /// replacement and the new `vector_chunks` rows in a single transaction.
+    /// `embeddings` is aligned to `chunks` by position; a missing or `None`
+    /// slot stores that chunk without a vector.
+    async fn write_document_presanitized(
+        &self,
+        input: NamespaceDocumentInput,
+        chunks: Vec<String>,
+        mut embeddings: Vec<Option<Vec<f32>>>,
     ) -> Result<String, String> {
         let namespace = Self::sanitize_namespace(&input.namespace);
         // The logical (delimiter-preserving) namespace, PII-redacted the same
@@ -43,16 +171,17 @@ impl UnifiedMemory {
         if key.is_empty() {
             return Err("document key cannot be empty".to_string());
         }
-        // Serialise writers of one key for the WHOLE operation. A deterministic
+        // Serialise writers of one key for the WHOLE write. A deterministic
         // document id stops two writers orphaning each other's chunks, but it
-        // does not ORDER them: the row write and the chunk replacement are
-        // separated by embedding, which awaits. Without this, writer A can
-        // update the row, await the embedder, and have B update the row and
-        // replace the chunks in between -- leaving B's content beside A's
-        // chunks, plus A's trailing chunks if A had more. The metadata-only
-        // path below takes the same lock: it writes the same row, so it must
-        // not interleave with a full write either. Same guard shape as the
-        // sync path's per-connection lock.
+        // does not ORDER them: the id / `created_at` lookups, the sidecar write
+        // (which awaits) and the transaction below must not interleave with
+        // another writer of the same key, or writer B's row can land between
+        // writer A's lookups and A's commit and be overwritten by content A
+        // resolved against stale state. The metadata-only path below takes the
+        // same lock: it writes the same row, so it must not interleave with a
+        // full write either. Same guard shape as the sync path's per-connection
+        // lock. Embedding happens before this lock is taken, so no provider
+        // round-trip is ever awaited while holding it.
         let _write_guard = Self::document_write_lock(&self.db_path, &namespace, &key)
             .lock_owned()
             .await;
@@ -113,6 +242,8 @@ impl UnifiedMemory {
         let tags_json = serde_json::to_string(&input.tags).map_err(|e| e.to_string())?;
         let metadata_json = input.metadata.to_string();
 
+        // Computed once; only attached to chunks that actually got a vector.
+        let signature = self.embedder.signature();
         {
             let conn = self.conn.lock();
             let tx = conn
@@ -161,77 +292,36 @@ impl UnifiedMemory {
                 params![namespace, document_id],
             )
             .map_err(|e| format!("clear vector chunks: {e}"))?;
-            tx.commit().map_err(|e| format!("commit tx: {e}"))?;
-        }
-
-        let chunks = Self::chunk_document_content(&input.content, 225);
-
-        // Embed every chunk in a SINGLE provider call rather than one
-        // round-trip per chunk. All providers implement the batch `embed`
-        // (`embed_one` is just a convenience wrapper around it), so a document
-        // that chunks into N pieces previously paid N sequential network
-        // round-trips on the write path; this collapses them to one.
-        //
-        // Result handling preserves the previous per-chunk resilience:
-        //   * a failed batch (provider error) stores all chunks WITHOUT a
-        //     vector — exactly what `embed_one(...).await.ok()` did per chunk;
-        //   * a provider that returns fewer/empty vectors than chunks (e.g.
-        //     `NoopEmbedding` returns an empty Vec, or a blank position from
-        //     NaN recovery) leaves those chunks vector-less by position.
-        let mut embeddings: Vec<Option<Vec<f32>>> = if chunks.is_empty() {
-            Vec::new()
-        } else {
-            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-            log::debug!(
-                "[memory] batch-embedding {} chunk(s) for {namespace}/{document_id}",
-                chunk_refs.len()
-            );
-            match self.embedder.embed(&chunk_refs).await {
-                Ok(vectors) => vectors
-                    .into_iter()
-                    .map(|v| (!v.is_empty()).then_some(v))
-                    .collect(),
-                Err(e) => {
-                    log::warn!(
-                        "[memory] batch embed failed for {} chunk(s) in {namespace}/{document_id}; storing without vectors: {e}",
-                        chunks.len()
-                    );
-                    Vec::new()
-                }
+            for (idx, chunk) in chunks.iter().enumerate() {
+                // Move the vector out by position so recall can exclude vectors
+                // produced by a different embedding model (cross-model cosine is
+                // meaningless) and guard against dimension mismatches. Missing
+                // positions (short/empty provider result) stay vector-less.
+                let embedded = embeddings.get_mut(idx).and_then(Option::take);
+                let dim = embedded.as_ref().map(|v| v.len() as i64);
+                let model_signature = embedded.as_ref().map(|_| signature.clone());
+                let embedding = embedded.as_ref().map(|v| Self::vec_to_bytes(v));
+                let chunk_id = format!("{document_id}:{idx}");
+                tx.execute(
+                    "INSERT OR REPLACE INTO vector_chunks
+                      (namespace, document_id, chunk_id, text, embedding, metadata_json, created_at, updated_at, model_signature, dim)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        namespace,
+                        document_id,
+                        chunk_id,
+                        chunk,
+                        embedding,
+                        json!({"lancedb_table": format!("ns_{namespace}"), "chunk_index": idx}).to_string(),
+                        now,
+                        now,
+                        model_signature,
+                        dim
+                    ],
+                )
+                .map_err(|e| format!("insert vector chunk: {e}"))?;
             }
-        };
-
-        // Computed once; only attached to chunks that actually got a vector.
-        let signature = self.embedder.signature();
-        for (idx, chunk) in chunks.iter().enumerate() {
-            // Move the vector out by position so recall can exclude vectors
-            // produced by a different embedding model (cross-model cosine is
-            // meaningless) and guard against dimension mismatches. Missing
-            // positions (short/empty provider result) stay vector-less.
-            let embedded = embeddings.get_mut(idx).and_then(Option::take);
-            let dim = embedded.as_ref().map(|v| v.len() as i64);
-            let model_signature = embedded.as_ref().map(|_| signature.clone());
-            let embedding = embedded.as_ref().map(|v| Self::vec_to_bytes(v));
-            let chunk_id = format!("{document_id}:{idx}");
-            let conn = self.conn.lock();
-            conn.execute(
-                "INSERT OR REPLACE INTO vector_chunks
-                  (namespace, document_id, chunk_id, text, embedding, metadata_json, created_at, updated_at, model_signature, dim)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    namespace,
-                    document_id,
-                    chunk_id,
-                    chunk,
-                    embedding,
-                    json!({"lancedb_table": format!("ns_{namespace}"), "chunk_index": idx}).to_string(),
-                    now,
-                    now,
-                    model_signature,
-                    dim
-                ],
-            )
-            .map_err(|e| format!("insert vector chunk: {e}"))?;
+            tx.commit().map_err(|e| format!("commit tx: {e}"))?;
         }
 
         Ok(document_id)

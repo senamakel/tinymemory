@@ -27,6 +27,23 @@ use tinymemory_api::host::EmbeddingProvider;
 /// Reference-counted handle to a `MemoryClient`.
 pub type MemoryClientRef = Arc<MemoryClient>;
 
+/// Outcome of [`MemoryClient::put_docs`].
+#[derive(Debug, Default)]
+pub struct BatchPutOutcome {
+    /// One entry per document attempted, in input order. The first failure
+    /// ends the batch and is always the last entry, so every document before
+    /// it was written and queued.
+    pub results: Vec<Result<String, String>>,
+    /// Written documents whose background graph-extraction job the ingestion
+    /// queue refused (it was full, or its worker had shut down). Those
+    /// documents are stored and searchable; only their entity/relation
+    /// extraction was skipped — the same best-effort drop a refused
+    /// [`MemoryClient::put_doc`] submission makes, counted here because a
+    /// batch submits hundreds of jobs in one burst where the per-document
+    /// write path spaced them out.
+    pub dropped_extractions: usize,
+}
+
 /// Thread-safe container for an optional `MemoryClientRef`.
 ///
 /// Used for global state management where the memory client may or may not
@@ -184,6 +201,50 @@ impl MemoryClient {
         });
 
         Ok(document_id)
+    }
+
+    /// Store many documents at once — the batch form of [`Self::put_doc`].
+    ///
+    /// The documents' chunks are embedded together, one provider request per
+    /// bounded group of chunk texts across the whole batch, instead of one
+    /// request per document (tinymemory#138). Each document is still gated,
+    /// written and queued for background graph extraction exactly as
+    /// `put_doc` does it.
+    ///
+    /// Documents are written in order and the first failure ends the batch:
+    /// [`BatchPutOutcome::results`] holds one entry per document attempted, in
+    /// input order, so a failure is always the last entry and every document
+    /// before it was written and queued. A graph-extraction job the ingestion
+    /// queue refuses is not a document failure — the document is stored — but
+    /// it is counted in [`BatchPutOutcome::dropped_extractions`] and logged,
+    /// so a burst that overruns the queue is visible to the caller.
+    pub async fn put_docs(&self, inputs: Vec<NamespaceDocumentInput>) -> BatchPutOutcome {
+        let results = self.inner.upsert_documents(inputs.clone()).await;
+        let mut dropped_extractions = 0;
+        for (document, result) in inputs.into_iter().zip(&results) {
+            if let Ok(document_id) = result {
+                let queued = self.ingestion_queue.submit(IngestionJob {
+                    document_id: document_id.clone(),
+                    document,
+                    config: MemoryIngestionConfig::default(),
+                });
+                if !queued {
+                    dropped_extractions += 1;
+                }
+            }
+        }
+        if dropped_extractions > 0 {
+            log::warn!(
+                "[memory] graph extraction skipped for {dropped_extractions} of {} written \
+                 document(s): the ingestion queue refused the job(s); the documents \
+                 themselves are stored",
+                results.iter().filter(|result| result.is_ok()).count()
+            );
+        }
+        BatchPutOutcome {
+            results,
+            dropped_extractions,
+        }
     }
 
     /// Store a document (DB row + markdown file) without vector embedding or

@@ -379,3 +379,97 @@ async fn ingest_doc_completes_and_stores_document() {
     // is exercised (no panic).
     let _ = result;
 }
+
+#[tokio::test]
+async fn put_docs_writes_every_document_and_returns_ids_in_order() {
+    let (_tmp, client) = make_client();
+    let outcome = client
+        .put_docs(vec![
+            doc("batch", "k1", "one"),
+            doc("batch", "k2", "two"),
+            doc("batch", "k3", "three"),
+        ])
+        .await;
+    assert_eq!(
+        outcome.dropped_extractions, 0,
+        "an idle default-capacity queue accepts every graph-extraction job"
+    );
+
+    let ids: Vec<String> = outcome
+        .results
+        .into_iter()
+        .map(|result| result.expect("each document is written"))
+        .collect();
+    assert_eq!(ids.len(), 3);
+
+    let listed = client.list_documents(Some("batch")).await.unwrap();
+    assert_eq!(listed["count"].as_u64(), Some(3));
+    let by_key: std::collections::BTreeMap<String, String> = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|document| {
+            (
+                document["key"].as_str().unwrap().to_string(),
+                document["documentId"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            by_key["k1"].clone(),
+            by_key["k2"].clone(),
+            by_key["k3"].clone()
+        ],
+        "ids come back in input order"
+    );
+}
+
+/// A batch submits its graph-extraction jobs in one burst, so a queue that a
+/// per-document trickle never overran can refuse some of them. The refusal is
+/// the queue's documented best-effort drop, but it must be counted rather
+/// than lost: the caller sees how many documents skipped extraction.
+#[tokio::test]
+async fn put_docs_counts_the_graph_jobs_a_full_ingestion_queue_refuses() {
+    use tinymemory_api::host::NoopEmbedding;
+    crate::test_seams::init();
+    let tmp = TempDir::new().unwrap();
+    let inner = Arc::new(UnifiedMemory::new(tmp.path(), Arc::new(NoopEmbedding), None).unwrap());
+    let state = IngestionState::new();
+    // A one-slot queue whose worker cannot drain: the test holds the singleton
+    // run lock the worker takes before it processes a job, so after the worker
+    // pulls the first job the slot refills once and every later job is refused.
+    let ingestion_queue =
+        ingestion_queue::start_worker_with_capacity(Arc::clone(&inner), state.clone(), 1);
+    let _worker_blocked = state.acquire().await;
+    let client = MemoryClient {
+        inner,
+        ingestion_queue,
+    };
+
+    let outcome = client
+        .put_docs(vec![
+            doc("burst", "k1", "one"),
+            doc("burst", "k2", "two"),
+            doc("burst", "k3", "three"),
+        ])
+        .await;
+
+    assert!(
+        outcome.results.iter().all(Result::is_ok),
+        "a refused extraction job is not a document failure, got {:?}",
+        outcome.results
+    );
+    assert!(
+        (1..=2).contains(&outcome.dropped_extractions),
+        "one job fits the single slot (two if the worker pulled the first before the \
+         next submit); the rest are refused and counted, got {}",
+        outcome.dropped_extractions
+    );
+    assert_eq!(
+        client.list_documents(Some("burst")).await.unwrap()["count"].as_u64(),
+        Some(3),
+        "refused extraction jobs do not affect the documents themselves"
+    );
+}
