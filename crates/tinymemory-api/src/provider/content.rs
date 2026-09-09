@@ -128,6 +128,26 @@ pub trait MemoryDocuments: Send + Sync {
 
     /// List document summaries, optionally restricted to one namespace.
     ///
+    /// # Shape
+    ///
+    /// ```json
+    /// { "count": 1, "documents": [ {
+    ///     "documentId": "...", "namespace": "...", "key": "...",
+    ///     "title": "...", "sourceType": "...", "priority": "...",
+    ///     "createdAt": 0.0, "updatedAt": 0.0, "taint": "internal"
+    /// } ] }
+    /// ```
+    ///
+    /// `count` equals the length of `documents`. Rows are newest-first by
+    /// `updatedAt`, and a caller must not depend on the order of rows sharing
+    /// one timestamp.
+    ///
+    /// This is written down because the return type cannot say it. Two drivers
+    /// disagreed on it in exactly the way an untyped payload invites — one
+    /// snake_case without a `count`, one camelCase with — and both satisfied
+    /// every check that existed. `assert_documents_round_trip` in
+    /// `tinymemory-conformance` is the executable half of this paragraph.
+    ///
     /// # Errors
     ///
     /// Backend failures only.
@@ -144,6 +164,17 @@ pub trait MemoryDocuments: Send + Sync {
     async fn list_namespaces(&self) -> Result<Vec<String>, MemoryError>;
 
     /// Delete a document by its driver-assigned id.
+    ///
+    /// # Shape
+    ///
+    /// ```json
+    /// { "deleted": true, "namespace": "...", "documentId": "..." }
+    /// ```
+    ///
+    /// `deleted` is `false` when no such document existed — see the error note
+    /// below. `namespace` is the namespace as the driver stores it, which need
+    /// not be the string the caller passed: a driver that sanitises namespaces
+    /// reports the sanitised form, and that is the point of echoing it back.
     ///
     /// # Errors
     ///

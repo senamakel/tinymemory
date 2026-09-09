@@ -36,10 +36,16 @@ use tinymemory_api::recall::OwnedRecallOpts;
 use tinymemory_api::tool_memory::ToolMemoryRule;
 use tinymemory_api::tree::{IngestRequest, QueryResult, TreeStatus};
 use tinymemory_api::types::{
-    GraphRelationRecord, MemoryCategory, MemoryEntry, MemoryKvRecord, MemoryTaint,
+    GraphRelationRecord, MemoryCategory, MemoryEntry, MemoryItemKind, MemoryKvRecord, MemoryTaint,
     NamespaceDocumentInput, NamespaceMemoryHit, NamespaceRetrievalContext, NamespaceSummary,
-    StoredMemoryDocument,
+    RetrievalScoreBreakdown, StoredMemoryDocument,
 };
+
+/// A relation's upsert key: its namespace and the triple it asserts.
+type RelationKey = (Option<String>, String, String, String);
+
+/// Relations held by [`RecordingProvider`], keyed by [`RelationKey`].
+type RelationRows = std::collections::HashMap<RelationKey, GraphRelationRecord>;
 
 /// The driver id [`RecordingProvider`] binds under.
 pub const FULL_DRIVER_ID: &str = "recording";
@@ -90,6 +96,29 @@ impl Call {
     }
 }
 
+/// The entity kinds [`MemoryRetrieval::search_entities`] accepts in its filter,
+/// as enumerated by the contract's own module docs.
+///
+/// Request-side only. `EntityMatch::kind` in a *response* is an open
+/// vocabulary and must never be checked against this list.
+const KNOWN_ENTITY_KINDS: &[&str] = &[
+    "email",
+    "url",
+    "handle",
+    "hashtag",
+    "person",
+    "organization",
+    "location",
+    "event",
+    "product",
+    "datetime",
+    "technology",
+    "artifact",
+    "quantity",
+    "misc",
+    "topic",
+];
+
 /// A provider that records and answers with empties.
 pub struct RecordingProvider {
     calls: Mutex<Vec<Call>>,
@@ -109,6 +138,13 @@ pub struct RecordingProvider {
     documents: Mutex<std::collections::HashMap<(String, String), StoredMemoryDocument>>,
     /// Rows written through [`MemoryGraph::kv_put`].
     kv: Mutex<std::collections::HashMap<(Option<String>, String), MemoryKvRecord>>,
+    /// Relations written through [`MemoryGraph::put_relation`], keyed on the
+    /// triple the contract upserts on.
+    relations: Mutex<RelationRows>,
+    /// Rules written through [`MemoryToolMemory::put_tool_rule`], keyed by id.
+    tool_rules: Mutex<std::collections::HashMap<String, ToolMemoryRule>>,
+    /// The document written through [`MemoryGoals::set_goals`].
+    goals: Mutex<Option<GoalsDoc>>,
     /// Entries written through [`MemoryCore::store`], keyed the way the
     /// contract upserts them.
     ///
@@ -137,6 +173,9 @@ impl RecordingProvider {
             namespace_summaries: Mutex::new(Vec::new()),
             documents: Mutex::new(std::collections::HashMap::new()),
             kv: Mutex::new(std::collections::HashMap::new()),
+            relations: Mutex::new(std::collections::HashMap::new()),
+            tool_rules: Mutex::new(std::collections::HashMap::new()),
+            goals: Mutex::new(None),
             entries: Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -507,6 +546,7 @@ impl MemoryDocuments for RecordingProvider {
             scoped: None,
         });
         let document_id = input.document_id.clone().unwrap_or_else(|| "doc".into());
+        let now = tinymemory_api::chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
         let stored = StoredMemoryDocument {
             document_id: document_id.clone(),
             namespace: input.namespace.clone(),
@@ -519,8 +559,8 @@ impl MemoryDocuments for RecordingProvider {
             metadata: input.metadata,
             category: input.category,
             session_id: input.session_id,
-            created_at: 0.0,
-            updated_at: 0.0,
+            created_at: now,
+            updated_at: now,
             markdown_rel_path: String::new(),
             taint: input.taint,
         };
@@ -541,10 +581,40 @@ impl MemoryDocuments for RecordingProvider {
 
     async fn list_documents(
         &self,
-        _namespace: Option<&str>,
+        namespace: Option<&str>,
     ) -> Result<serde_json::Value, MemoryError> {
         self.record(Call::plain("documents.list_documents"));
-        Ok(serde_json::json!({"documents": []}))
+        let docs = lock(&self.documents);
+        let mut rows: Vec<&StoredMemoryDocument> = docs
+            .values()
+            .filter(|doc| namespace.is_none_or(|want| doc.namespace == want))
+            .collect();
+        // Newest first, as the engine's `ORDER BY updated_at DESC` gives. Ties
+        // break on the key so the order is total rather than merely stable,
+        // because two documents written in the same millisecond otherwise come
+        // back in `HashMap` order — reproducible for a run and not between them.
+        rows.sort_by(|a, b| {
+            b.updated_at
+                .total_cmp(&a.updated_at)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        let documents: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|d| {
+                serde_json::json!({
+                    "documentId": d.document_id,
+                    "namespace": d.namespace,
+                    "key": d.key,
+                    "title": d.title,
+                    "sourceType": d.source_type,
+                    "priority": d.priority,
+                    "createdAt": d.created_at,
+                    "updatedAt": d.updated_at,
+                    "taint": d.taint,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "count": documents.len(), "documents": documents }))
     }
 
     async fn list_namespaces(&self) -> Result<Vec<String>, MemoryError> {
@@ -570,7 +640,14 @@ impl MemoryDocuments for RecordingProvider {
             .find(|((ns, _), doc)| ns == namespace && doc.document_id == document_id)
             .map(|(k, _)| k.clone());
         let deleted = victim.is_some_and(|k| docs.remove(&k).is_some());
-        Ok(serde_json::json!({ "deleted": deleted }))
+        // The namespace and the id are echoed back because the contract's
+        // documented envelope carries them — this driver does not sanitise, so
+        // the namespace it reports is the one it was handed.
+        Ok(serde_json::json!({
+            "deleted": deleted,
+            "namespace": namespace,
+            "documentId": document_id,
+        }))
     }
 
     async fn clear_namespace(&self, namespace: &str) -> Result<(), MemoryError> {
@@ -602,14 +679,75 @@ impl MemoryDocuments for RecordingProvider {
     async fn recall_documents(
         &self,
         namespace: &str,
-        _limit: usize,
+        limit: usize,
     ) -> Result<NamespaceRetrievalContext, MemoryError> {
         self.record(Call::plain("documents.recall_documents"));
+        // Query-less recall over the documents this driver holds.
+        //
+        // It used to answer an empty context unconditionally, which for a
+        // namespace holding documents is the write-only shape again, reached
+        // through a different reader: `put_document` accepted the write and
+        // this said the namespace was empty. The contract's "an empty
+        // namespace returns empty context" carries the converse.
+        //
+        // Freshness is the whole of the ranking here, and deliberately so. The
+        // contract calls this "the namespace's freshness and priority
+        // ranking"; freshness is `updated_at`, which any driver storing
+        // documents has, whereas how priority *weighs against* it is a scoring
+        // model this driver has no business inventing. So `priority` breaks
+        // ties and nothing more, and `score` stays 0.0 rather than a number
+        // that would look like a ranking signal a caller could sort on.
+        let docs = lock(&self.documents);
+        let mut rows: Vec<&StoredMemoryDocument> = docs
+            .values()
+            .filter(|doc| doc.namespace == namespace)
+            .collect();
+        rows.sort_by(|a, b| {
+            b.updated_at
+                .total_cmp(&a.updated_at)
+                .then_with(|| a.priority.cmp(&b.priority))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        rows.truncate(limit);
+        let hits: Vec<NamespaceMemoryHit> = rows
+            .iter()
+            .map(|d| NamespaceMemoryHit {
+                id: d.document_id.clone(),
+                kind: MemoryItemKind::Document,
+                namespace: d.namespace.clone(),
+                key: d.key.clone(),
+                title: Some(d.title.clone()),
+                content: d.content.clone(),
+                category: d.category.clone(),
+                source_type: Some(d.source_type.clone()),
+                updated_at: d.updated_at,
+                score: 0.0,
+                score_breakdown: RetrievalScoreBreakdown::default(),
+                document_id: Some(d.document_id.clone()),
+                chunk_id: None,
+                supporting_relations: Vec::new(),
+                taint: d.taint,
+            })
+            .collect();
+        // `context_text` is documented as "assembled from `hits`", so it is
+        // assembled from them rather than rendered independently — the two
+        // disagreeing is the defect the field's own doc comment warns about.
+        let context_text = hits
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{}\n{}",
+                    hit.title.as_deref().unwrap_or(&hit.key),
+                    hit.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
         Ok(NamespaceRetrievalContext {
             namespace: namespace.to_string(),
             query: None,
-            context_text: String::new(),
-            hits: vec![],
+            context_text,
+            hits,
         })
     }
 }
@@ -870,11 +1008,32 @@ impl MemoryGraph for RecordingProvider {
         _limit: usize,
     ) -> Result<Vec<GraphRelationRecord>, MemoryError> {
         self.record(Call::plain("graph.relations"));
-        Ok(vec![])
+        let want_ns = _namespace.map(str::to_string);
+        let mut rows: Vec<GraphRelationRecord> = lock(&self.relations)
+            .values()
+            .filter(|r| _namespace.is_none() || r.namespace == want_ns)
+            .filter(|r| _subject.is_none_or(|s| r.subject == s))
+            .filter(|r| _predicate.is_none_or(|p| r.predicate == p))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| {
+            (&a.subject, &a.predicate, &a.object).cmp(&(&b.subject, &b.predicate, &b.object))
+        });
+        rows.truncate(_limit);
+        Ok(rows)
     }
 
-    async fn put_relation(&self, _relation: GraphRelationRecord) -> Result<(), MemoryError> {
+    async fn put_relation(&self, relation: GraphRelationRecord) -> Result<(), MemoryError> {
         self.record(Call::plain("graph.put_relation"));
+        lock(&self.relations).insert(
+            (
+                relation.namespace.clone(),
+                relation.subject.clone(),
+                relation.predicate.clone(),
+                relation.object.clone(),
+            ),
+            relation,
+        );
         Ok(())
     }
 }
@@ -910,34 +1069,47 @@ impl MemoryDiff for RecordingProvider {
 impl MemoryGoals for RecordingProvider {
     async fn goals(&self) -> Result<GoalsDoc, MemoryError> {
         self.record(Call::plain("goals.goals"));
-        Ok(GoalsDoc::default())
+        Ok(lock(&self.goals).clone().unwrap_or_default())
     }
 
-    async fn set_goals(&self, _goals: GoalsDoc) -> Result<(), MemoryError> {
+    async fn set_goals(&self, goals: GoalsDoc) -> Result<(), MemoryError> {
         self.record(Call::plain("goals.set_goals"));
+        *lock(&self.goals) = Some(goals);
         Ok(())
     }
 }
 
 #[async_trait]
 impl MemoryToolMemory for RecordingProvider {
-    async fn tool_rules(&self, _tool_name: &str) -> Result<Vec<ToolMemoryRule>, MemoryError> {
+    async fn tool_rules(&self, tool_name: &str) -> Result<Vec<ToolMemoryRule>, MemoryError> {
         self.record(Call::plain("tool_memory.tool_rules"));
-        Ok(vec![])
+        let mut rows: Vec<ToolMemoryRule> = lock(&self.tool_rules)
+            .values()
+            .filter(|r| r.tool_name == tool_name)
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(rows)
     }
 
-    async fn put_tool_rule(&self, _rule: ToolMemoryRule) -> Result<(), MemoryError> {
+    async fn put_tool_rule(&self, rule: ToolMemoryRule) -> Result<(), MemoryError> {
         self.record(Call::plain("tool_memory.put_tool_rule"));
+        lock(&self.tool_rules).insert(rule.id.clone(), rule);
         Ok(())
     }
 
-    async fn delete_tool_rule(
-        &self,
-        _tool_name: &str,
-        _rule_id: &str,
-    ) -> Result<bool, MemoryError> {
+    async fn delete_tool_rule(&self, tool_name: &str, rule_id: &str) -> Result<bool, MemoryError> {
         self.record(Call::plain("tool_memory.delete_tool_rule"));
-        Ok(false)
+        let mut rules = lock(&self.tool_rules);
+        match rules.get(rule_id) {
+            Some(rule) if rule.tool_name == tool_name => {
+                rules.remove(rule_id);
+                Ok(true)
+            }
+            // Deleting by the wrong tool name is a miss, not a silent success:
+            // the id is unique but the pair is what the caller asserted.
+            _ => Ok(false),
+        }
     }
 }
 #[async_trait]
@@ -1501,10 +1673,29 @@ impl MemoryRetrieval for RecordingProvider {
     async fn search_entities(
         &self,
         _query: &str,
-        _kinds: Option<&[String]>,
+        kinds: Option<&[String]>,
         _limit: usize,
     ) -> Result<Vec<EntityMatch>, MemoryError> {
         self.record(Call::plain("retrieval.search_entities"));
+        // Validating the filter is a contract obligation, not an engine
+        // nicety: `MemoryRetrieval::search_entities` documents `Invalid` for an
+        // unrecognised kind precisely because "silently matching nothing would
+        // look identical to a genuine empty result". This driver answers no
+        // matches, so it is the one driver where skipping the check is
+        // invisible — and answering `Ok(vec![])` to a typo is exactly the
+        // confusion the rule exists to prevent.
+        //
+        // The vocabulary is open on the *response* side (`EntityMatch::kind` is
+        // a passthrough string, so an engine may emit a kind this build has not
+        // heard of) and closed on the *request* side. `KNOWN_ENTITY_KINDS` is
+        // the request-side list the contract's module docs enumerate.
+        if let Some(kinds) = kinds {
+            for kind in kinds {
+                if !KNOWN_ENTITY_KINDS.contains(&kind.as_str()) {
+                    return Err(MemoryError::Invalid(format!("unknown entity kind: {kind}")));
+                }
+            }
+        }
         Ok(vec![])
     }
 }

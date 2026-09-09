@@ -15,6 +15,10 @@
 //! A suite that could not run against `null` would be asserting storage rather
 //! than the contract.
 
+// A panic in a test IS the failure report — the same allowance the sibling
+// conformance target carries.
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 
 use tinymemory_api::null::NullMemoryProvider;
@@ -92,5 +96,124 @@ async fn the_full_driver_retains_writes() {
         tinymemory_conformance::retains_writes(&provider).await,
         "the full driver dropped a write — assert_provider would then skip \
          every storage assertion and pass vacuously"
+    );
+}
+
+/// Every optional family the full driver serves must read back what it wrote.
+///
+/// `the_full_driver_retains_writes` asserts this for the entry tier only, and
+/// that turned out to be too narrow: `put_document` stored while
+/// `list_documents` answered `[]`, `put_tool_rule` stored while `tool_rules`
+/// answered `[]`, `set_goals` stored while `goals` answered the default, and
+/// `put_relation` stored while `relations` answered `[]`. Four write-only
+/// families, each of which a host discovers as a handler round-trip that
+/// silently returns nothing.
+///
+/// The suite could not catch it. `assert_provider`'s optional-family
+/// assertions are gated on `as_*()`, and a driver that advertises a family and
+/// discards its writes still satisfies every shape check. So this is a probe,
+/// in the shape of `retains_writes`, spent once per family that stores.
+#[tokio::test]
+async fn the_full_driver_retains_every_family_it_serves() {
+    use tinymemory_api::goals::GoalsDoc;
+    use tinymemory_api::tool_memory::{ToolMemoryPriority, ToolMemoryRule, ToolMemorySource};
+    use tinymemory_api::types::{GraphRelationRecord, NamespaceDocumentInput};
+
+    let p = tinymemory_conformance::RecordingProvider::new();
+
+    // documents: put -> list
+    let documents = p.as_documents().expect("documents");
+    documents
+        .put_document(NamespaceDocumentInput {
+            namespace: "retention".into(),
+            key: "k".into(),
+            title: "t".into(),
+            content: "c".into(),
+            source_type: "conformance".into(),
+            priority: "normal".into(),
+            tags: vec![],
+            metadata: serde_json::Value::Null,
+            category: "core".into(),
+            session_id: None,
+            document_id: None,
+            taint: tinymemory_api::types::MemoryTaint::Internal,
+        })
+        .await
+        .expect("put_document");
+    let listed = documents
+        .list_documents(Some("retention"))
+        .await
+        .expect("list_documents");
+    assert!(
+        listed["documents"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|d| d["key"] == "k")),
+        "put_document stored nothing list_documents can see: {listed}"
+    );
+
+    // graph relations: put -> read
+    let graph = p.as_graph().expect("graph");
+    graph
+        .put_relation(GraphRelationRecord {
+            namespace: Some("retention".into()),
+            subject: "s".into(),
+            predicate: "p".into(),
+            object: "o".into(),
+            attrs: serde_json::Value::Null,
+            updated_at: 0.0,
+            evidence_count: 1,
+            order_index: None,
+            document_ids: vec![],
+            chunk_ids: vec![],
+        })
+        .await
+        .expect("put_relation");
+    assert!(
+        !graph
+            .relations(Some("retention"), Some("s"), None, 10)
+            .await
+            .expect("relations")
+            .is_empty(),
+        "put_relation stored nothing relations can see"
+    );
+
+    // tool memory: put -> list -> delete
+    let tools = p.as_tool_memory().expect("tool_memory");
+    tools
+        .put_tool_rule(ToolMemoryRule {
+            id: "r1".into(),
+            tool_name: "shell".into(),
+            rule: "be careful".into(),
+            priority: ToolMemoryPriority::Normal,
+            source: ToolMemorySource::UserExplicit,
+            tags: vec![],
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .await
+        .expect("put_tool_rule");
+    assert_eq!(
+        tools.tool_rules("shell").await.expect("tool_rules").len(),
+        1,
+        "put_tool_rule stored nothing tool_rules can see"
+    );
+    assert!(
+        tools
+            .delete_tool_rule("shell", "r1")
+            .await
+            .expect("delete_tool_rule"),
+        "delete_tool_rule did not find the rule that was just written"
+    );
+
+    // goals: set -> read
+    let goals = p.as_goals().expect("goals");
+    let doc = GoalsDoc {
+        items: vec![tinymemory_api::goals::GoalItem::new("g1", "ship it")],
+    };
+    goals.set_goals(doc).await.expect("set_goals");
+    assert_eq!(
+        goals.goals().await.expect("goals").items.len(),
+        1,
+        "set_goals stored nothing goals can see"
     );
 }

@@ -43,6 +43,7 @@ pub async fn assert_provider(provider: Arc<dyn MemoryProvider>) {
     assert_forget_is_idempotent(p).await;
     assert_namespaces_are_isolated(p).await;
     assert_export_cursor_terminates(p).await;
+    assert_search_entities_rejects_unknown_kind(p).await;
 
     // The contract permits a driver that accepts writes and discards them —
     // `NullMemoryProvider` is exactly that, and it is a legitimate binding for a
@@ -68,6 +69,53 @@ pub async fn assert_provider(provider: Arc<dyn MemoryProvider>) {
     assert_awkward_content_round_trips(p).await;
     assert_kv_round_trip(p).await;
     assert_documents_round_trip(p).await;
+}
+
+/// An unrecognised entity kind in `search_entities`' filter is `Invalid`.
+///
+/// This is a shape assertion, not a storage one — it applies to a driver that
+/// retains nothing just as much as to one that retains everything, which is why
+/// it runs above the [`retains_writes`] gate. A driver with an empty entity
+/// index is in fact the one where getting this wrong is *least* visible: every
+/// query answers `Ok(vec![])` whether the filter was a typo or not.
+///
+/// That is exactly what the contract's module docs say the rule exists to
+/// prevent — "silently matching nothing would look identical to a genuine empty
+/// result" — and it was found the way such rules usually are, from a host that
+/// got `[]` back for a misspelled kind and treated it as "no such entity".
+///
+/// Only the request side is checked. `EntityMatch::kind` in a *response* is an
+/// open vocabulary on purpose (a closed enum would make a newly-emitted kind a
+/// deserialization failure rather than an unfamiliar label), so nothing here
+/// asserts which kinds a driver *accepts* — engines legitimately differ, and a
+/// driver that grew a new one must not start failing this suite.
+///
+/// # Panics
+///
+/// Panics when the driver accepts a kind that cannot exist, or refuses it with
+/// a class other than [`MemoryError::Invalid`] — a `Backend` or `Unsupported`
+/// here is a failure wearing a refusal's clothes, the same distinction
+/// [`assert_awkward_content_round_trips`] draws.
+pub async fn assert_search_entities_rejects_unknown_kind(provider: &dyn MemoryProvider) {
+    let who = provider.driver_id();
+    let Some(retrieval) = provider.as_retrieval() else {
+        return;
+    };
+    // Not a plausible future kind: no engine can grow this one.
+    let bogus = ["definitely not an entity kind".to_string()];
+    match retrieval.search_entities("anything", Some(&bogus), 5).await {
+        Err(MemoryError::Invalid(_)) => {}
+        Ok(hits) => panic!(
+            "{who}: search_entities accepted an unrecognised kind and answered {} hits; \
+             an unknown kind must be Invalid, or a caller's typo is indistinguishable \
+             from an empty index",
+            hits.len()
+        ),
+        Err(other) => panic!(
+            "{who}: refusing an unrecognised entity kind must be Invalid (a validation \
+             refusal); got: {other}"
+        ),
+    }
 }
 
 /// Whether this driver reads back what it stores.
@@ -785,7 +833,7 @@ pub async fn assert_documents_round_trip(provider: &dyn MemoryProvider) {
         taint: MemoryTaint::ExternalSync,
     };
 
-    documents
+    let document_id = documents
         .put_document(write("first", "the first body"))
         .await
         .unwrap_or_else(|e| panic!("{who}: put_document failed: {e}"));
@@ -829,6 +877,140 @@ pub async fn assert_documents_round_trip(provider: &dyn MemoryProvider) {
     assert_eq!(
         replaced.content, "the second body",
         "{who}: a second write under the same key did not replace the first"
+    );
+
+    // `list_documents` answers an untyped `serde_json::Value`, so nothing in the
+    // type system makes two drivers agree on what is inside it. That is not
+    // hypothetical: the reference driver returned `{"documents": [{"document_id":
+    // …}]}` — snake_case, no `count` — against the engine's `{"count": N,
+    // "documents": [{"documentId": …}]}`, and both passed every assertion this
+    // suite made, because this suite made none. A host decoding the envelope got
+    // `missing field \`documentId\`` from one driver and rows from the other.
+    //
+    // So the envelope is pinned here, at the level the contract actually
+    // promises: the two envelope fields, `count` agreeing with the array, and
+    // the per-row keys a caller reads. Row *order* is deliberately not asserted
+    // — the engine orders by `updated_at DESC` and two writes can land in the
+    // same tick, so an order assertion would be a flake rather than a contract.
+    let listed = documents
+        .list_documents(Some(&namespace))
+        .await
+        .unwrap_or_else(|e| panic!("{who}: list_documents failed: {e}"));
+    let rows = listed
+        .get("documents")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("{who}: list_documents must answer an object with a `documents` array; got {listed}")
+        });
+    assert_eq!(
+        rows.len(),
+        1,
+        "{who}: list_documents of a namespace holding one document returned {} rows",
+        rows.len()
+    );
+    assert_eq!(
+        listed.get("count").and_then(serde_json::Value::as_u64),
+        Some(rows.len() as u64),
+        "{who}: list_documents `count` must equal the length of `documents`; got {listed}"
+    );
+    let row = &rows[0];
+    for field in [
+        "documentId",
+        "namespace",
+        "key",
+        "title",
+        "sourceType",
+        "priority",
+        "createdAt",
+        "updatedAt",
+        "taint",
+    ] {
+        assert!(
+            row.get(field).is_some(),
+            "{who}: list_documents row is missing `{field}`; got {row}"
+        );
+    }
+    assert_eq!(
+        row.get("key").and_then(serde_json::Value::as_str),
+        Some(key),
+        "{who}: list_documents returned a row for a different key"
+    );
+    assert_eq!(
+        row.get("namespace").and_then(serde_json::Value::as_str),
+        Some(namespace.as_str()),
+        "{who}: list_documents returned a row under a different namespace"
+    );
+
+    // Query-less recall must see a document the namespace holds. The contract
+    // says "an empty namespace returns empty context", and this is the
+    // converse: a driver that accepted `put_document` and then reports the
+    // namespace as empty here has a family that is readable through one
+    // accessor and blank through another.
+    //
+    // `Unsupported` is tolerated because the method's own error note says a
+    // provider predating this optional operation answers exactly that. What is
+    // not tolerated is `Ok` with nothing in it.
+    //
+    // Ranking is not asserted. The contract calls this a freshness-and-priority
+    // ranking, and how a driver weighs those is its own model — this checks
+    // that the document is *reachable*, not where it placed.
+    match documents.recall_documents(&namespace, 10).await {
+        Err(MemoryError::Unsupported { .. }) => {}
+        Err(other) => panic!("{who}: recall_documents failed: {other}"),
+        Ok(recalled) => {
+            assert!(
+                !recalled.hits.is_empty(),
+                "{who}: recall_documents returned no hits for a namespace holding a document"
+            );
+            assert!(
+                !recalled.context_text.is_empty(),
+                "{who}: recall_documents returned empty context_text while reporting {} hits — \
+                 the rendered text is documented as assembled from those hits",
+                recalled.hits.len()
+            );
+            assert!(
+                recalled.hits.iter().any(|hit| hit.key == key),
+                "{who}: recall_documents hits do not include the document that was written"
+            );
+        }
+    }
+
+    // The second — and last — untyped payload in the contract. Same reasoning
+    // as the envelope above: `delete_document` answers a `serde_json::Value`,
+    // so the three fields a caller reads are pinned here or nowhere. A host
+    // decoding this got `missing field `namespace`` from the reference driver
+    // and a row from the engine.
+    //
+    // `deleted` is asserted true because the document demonstrably exists at
+    // this point; the "missing document reports an outcome rather than an
+    // error" half of the doc comment is checked by the second call below,
+    // which must not be an `Err`.
+    let removed = documents
+        .delete_document(&namespace, &document_id)
+        .await
+        .unwrap_or_else(|e| panic!("{who}: delete_document failed: {e}"));
+    assert_eq!(
+        removed.get("deleted").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "{who}: delete_document must report `deleted: true` for a document that was there; got {removed}"
+    );
+    for field in ["namespace", "documentId"] {
+        assert!(
+            removed.get(field).is_some(),
+            "{who}: delete_document envelope is missing `{field}`; got {removed}"
+        );
+    }
+    // Deleting what is no longer there is an outcome, not a fault.
+    let again = documents
+        .delete_document(&namespace, &document_id)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("{who}: deleting an absent document must report an outcome, not error: {e}")
+        });
+    assert_eq!(
+        again.get("deleted").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "{who}: the second delete of the same id must report `deleted: false`; got {again}"
     );
 
     documents
