@@ -41,6 +41,7 @@
 pub mod reference;
 pub mod suite;
 
+pub use reference::full::{Call, RecordingProvider, FULL_DRIVER_ID};
 pub use reference::{InMemoryProvider, REFERENCE_DRIVER_ID};
 pub use suite::{
     assert_awkward_content_round_trips, assert_capability_audit, assert_export_cursor_terminates,

@@ -1,10 +1,11 @@
 // ported from openhuman src/openhuman/memory/guard/test_support_part_0{1,2,3}.rs
+use std::sync::Mutex;
 use tinymemory_api::provider::operations::{
     MemoryAnswer, MemoryConversationIngest, MemoryDocumentIngest, MemoryEventIngest,
     MemoryLearningIngest,
 };
-use std::sync::Mutex;
 
+use async_trait::async_trait;
 use tinymemory_api::capabilities::Capabilities;
 use tinymemory_api::chunks::Chunk;
 use tinymemory_api::error::MemoryError;
@@ -39,7 +40,22 @@ use tinymemory_api::types::{
     NamespaceDocumentInput, NamespaceMemoryHit, NamespaceRetrievalContext, NamespaceSummary,
     StoredMemoryDocument,
 };
-use async_trait::async_trait;
+
+/// The driver id [`RecordingProvider`] binds under.
+pub const FULL_DRIVER_ID: &str = "recording";
+
+/// Locks a fake's state, recovering from a poisoned mutex rather than failing.
+///
+/// A poisoned lock means an earlier caller panicked while holding it. In a
+/// storage engine that is a reason to refuse the call, and the reference driver
+/// does exactly that. Here it is not: this driver's state is a call log and a
+/// couple of maps, a panicking test has already failed, and turning its
+/// neighbour's lock into a second, unrelated failure only obscures which test
+/// broke. `into_inner` keeps the first failure the only one.
+fn lock<T>(cell: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    cell.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// One call that reached the driver.
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +104,11 @@ pub struct RecordingProvider {
     /// What `namespaces` returns, so a namespace can look populated (Lane B
     /// asks for the count before it pays for an embed) without a real store.
     namespace_summaries: Mutex<Vec<NamespaceSummary>>,
+    /// Documents written through [`MemoryDocuments::put_document`], keyed the
+    /// way the contract upserts them.
+    documents: Mutex<std::collections::HashMap<(String, String), StoredMemoryDocument>>,
+    /// Rows written through [`MemoryGraph::kv_put`].
+    kv: Mutex<std::collections::HashMap<(Option<String>, String), MemoryKvRecord>>,
 }
 
 impl Default for RecordingProvider {
@@ -106,66 +127,66 @@ impl RecordingProvider {
             fast_retrieve_result: Mutex::new(RetrievalResponse::default()),
             namespace_hits: Mutex::new(Vec::new()),
             namespace_summaries: Mutex::new(Vec::new()),
+            documents: Mutex::new(std::collections::HashMap::new()),
+            kv: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     /// Sets what [`MemoryRecall::recall`] returns.
     #[must_use]
     pub fn with_recall_result(self, entries: Vec<MemoryEntry>) -> Self {
-        *self.recall_result.lock().unwrap() = entries;
+        *lock(&self.recall_result) = entries;
         self
     }
 
     /// Sets what [`MemoryRetrieval::fast_retrieve`] returns.
     #[must_use]
     pub fn with_fast_retrieve_result(self, response: RetrievalResponse) -> Self {
-        *self.fast_retrieve_result.lock().unwrap() = response;
+        *lock(&self.fast_retrieve_result) = response;
         self
     }
 
     /// Sets what [`MemoryRetrieval::recall_namespace_scored`] returns.
     #[must_use]
     pub fn with_namespace_hits(self, hits: Vec<NamespaceMemoryHit>) -> Self {
-        *self.namespace_hits.lock().unwrap() = hits;
+        *lock(&self.namespace_hits) = hits;
         self
     }
 
     /// Sets what [`MemoryCore::namespaces`] returns.
     #[must_use]
     pub fn with_namespace_summaries(self, summaries: Vec<NamespaceSummary>) -> Self {
-        *self.namespace_summaries.lock().unwrap() = summaries;
+        *lock(&self.namespace_summaries) = summaries;
         self
     }
 
     fn record(&self, call: Call) {
-        self.calls.lock().unwrap().push(call);
+        lock(&self.calls).push(call);
     }
 
     /// Every call this driver has been handed, in order.
     #[must_use]
     pub fn calls(&self) -> Vec<Call> {
-        self.calls.lock().unwrap().clone()
+        lock(&self.calls).clone()
     }
 
     /// How many calls this driver has been handed.
     #[must_use]
     pub fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        lock(&self.calls).len()
     }
 
     /// The single recorded call, panicking when there is not exactly one.
     pub fn only_call(&self) -> Call {
-        let calls = self.calls();
+        let mut calls = self.calls();
         assert_eq!(
             calls.len(),
             1,
             "expected exactly one driver call: {calls:?}"
         );
-        calls.into_iter().next().unwrap()
+        calls.remove(0)
     }
 }
-
-
 
 /// An [`ExportRecord`] fixture.
 pub fn export_record(taint: MemoryTaint) -> ExportRecord {
@@ -177,8 +198,6 @@ pub fn export_record(taint: MemoryTaint) -> ExportRecord {
         payload: serde_json::Value::Null,
     }
 }
-
-
 
 /// A [`MemoryEntry`] fixture.
 pub fn entry(content: &str) -> MemoryEntry {
@@ -267,7 +286,7 @@ impl MemoryCore for RecordingProvider {
 
     async fn namespaces(&self) -> Result<Vec<NamespaceSummary>, MemoryError> {
         self.record(Call::plain("core.namespaces"));
-        Ok(self.namespace_summaries.lock().unwrap().clone())
+        Ok(lock(&self.namespace_summaries).clone())
     }
 }
 
@@ -286,18 +305,28 @@ impl MemoryRecall for RecordingProvider {
             taint: None,
             scoped: Some(scope.is_some()),
         });
-        Ok(self.recall_result.lock().unwrap().clone())
+        Ok(lock(&self.recall_result).clone())
     }
 }
 
 #[async_trait]
 impl MemoryPortability for RecordingProvider {
+    // A cursor this driver never issued is refused rather than silently
+    // restarting the export, which would duplicate rows for a caller paging
+    // through. The fake issues no cursors at all, so *every* cursor is
+    // unrecognised — which is exactly the state the contract's rule is about,
+    // and the port arrived here answering an empty page instead.
     async fn export_page(
         &self,
-        _cursor: Option<&str>,
+        cursor: Option<&str>,
         _limit: usize,
     ) -> Result<ExportPage, MemoryError> {
         self.record(Call::plain("portability.export_page"));
+        if let Some(cursor) = cursor {
+            return Err(MemoryError::Invalid(format!(
+                "unrecognised export cursor: {cursor}"
+            )));
+        }
         Ok(ExportPage::default())
     }
 
@@ -343,20 +372,41 @@ impl MemoryDocuments for RecordingProvider {
     async fn put_document(&self, input: NamespaceDocumentInput) -> Result<String, MemoryError> {
         self.record(Call {
             method: "documents.put_document".into(),
-            content: Some(input.content),
+            content: Some(input.content.clone()),
             taint: Some(input.taint),
             scoped: None,
         });
-        Ok("doc".into())
+        let document_id = input.document_id.clone().unwrap_or_else(|| "doc".into());
+        let stored = StoredMemoryDocument {
+            document_id: document_id.clone(),
+            namespace: input.namespace.clone(),
+            key: input.key.clone(),
+            title: input.title,
+            content: input.content,
+            source_type: input.source_type,
+            priority: input.priority,
+            tags: input.tags,
+            metadata: input.metadata,
+            category: input.category,
+            session_id: input.session_id,
+            created_at: 0.0,
+            updated_at: 0.0,
+            markdown_rel_path: String::new(),
+            taint: input.taint,
+        };
+        lock(&self.documents).insert((input.namespace, input.key), stored);
+        Ok(document_id)
     }
 
     async fn get_document(
         &self,
-        _namespace: &str,
-        _key: &str,
+        namespace: &str,
+        key: &str,
     ) -> Result<Option<StoredMemoryDocument>, MemoryError> {
         self.record(Call::plain("documents.get_document"));
-        Ok(None)
+        Ok(lock(&self.documents)
+            .get(&(namespace.to_string(), key.to_string()))
+            .cloned())
     }
 
     async fn list_documents(
@@ -369,20 +419,33 @@ impl MemoryDocuments for RecordingProvider {
 
     async fn list_namespaces(&self) -> Result<Vec<String>, MemoryError> {
         self.record(Call::plain("documents.list_namespaces"));
-        Ok(vec![])
+        let mut seen: Vec<String> = lock(&self.documents)
+            .keys()
+            .map(|(ns, _)| ns.clone())
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        Ok(seen)
     }
 
     async fn delete_document(
         &self,
-        _namespace: &str,
-        _document_id: &str,
+        namespace: &str,
+        document_id: &str,
     ) -> Result<serde_json::Value, MemoryError> {
         self.record(Call::plain("documents.delete_document"));
-        Ok(serde_json::json!({"deleted": false}))
+        let mut docs = lock(&self.documents);
+        let victim = docs
+            .iter()
+            .find(|((ns, _), doc)| ns == namespace && doc.document_id == document_id)
+            .map(|(k, _)| k.clone());
+        let deleted = victim.is_some_and(|k| docs.remove(&k).is_some());
+        Ok(serde_json::json!({ "deleted": deleted }))
     }
 
-    async fn clear_namespace(&self, _namespace: &str) -> Result<(), MemoryError> {
+    async fn clear_namespace(&self, namespace: &str) -> Result<(), MemoryError> {
         self.record(Call::plain("documents.clear_namespace"));
+        lock(&self.documents).retain(|(ns, _), _| ns != namespace);
         Ok(())
     }
 
@@ -500,8 +563,7 @@ impl MemoryTree for RecordingProvider {
         &self,
         _per_namespace_cap: usize,
         _total_cap: usize,
-    ) -> Result<Vec<tinymemory_api::provider::content::RootSummary>, MemoryError>
-    {
+    ) -> Result<Vec<tinymemory_api::provider::content::RootSummary>, MemoryError> {
         self.record(Call::plain("tree.root_summaries_with_caps"));
         Ok(Vec::new())
     }
@@ -615,13 +677,15 @@ impl MemoryGraph for RecordingProvider {
         _key: &str,
     ) -> Result<Option<MemoryKvRecord>, MemoryError> {
         self.record(Call::plain("graph.kv_get"));
-        Ok(None)
+        Ok(lock(&self.kv)
+            .get(&(_namespace.map(str::to_string), _key.to_string()))
+            .cloned())
     }
 
     async fn kv_put(
         &self,
-        _namespace: Option<&str>,
-        _key: &str,
+        namespace: Option<&str>,
+        key: &str,
         value: serde_json::Value,
     ) -> Result<(), MemoryError> {
         self.record(Call {
@@ -630,12 +694,24 @@ impl MemoryGraph for RecordingProvider {
             taint: None,
             scoped: None,
         });
+        let owned_ns = namespace.map(str::to_string);
+        lock(&self.kv).insert(
+            (owned_ns.clone(), key.to_string()),
+            MemoryKvRecord {
+                namespace: owned_ns,
+                key: key.to_string(),
+                value,
+                updated_at: 0.0,
+            },
+        );
         Ok(())
     }
 
-    async fn kv_delete(&self, _namespace: Option<&str>, _key: &str) -> Result<bool, MemoryError> {
+    async fn kv_delete(&self, namespace: Option<&str>, key: &str) -> Result<bool, MemoryError> {
         self.record(Call::plain("graph.kv_delete"));
-        Ok(false)
+        Ok(lock(&self.kv)
+            .remove(&(namespace.map(str::to_string), key.to_string()))
+            .is_some())
     }
 
     async fn kv_list(
@@ -645,7 +721,15 @@ impl MemoryGraph for RecordingProvider {
         _limit: usize,
     ) -> Result<Vec<MemoryKvRecord>, MemoryError> {
         self.record(Call::plain("graph.kv_list"));
-        Ok(vec![])
+        let want_ns = _namespace.map(str::to_string);
+        let mut rows: Vec<MemoryKvRecord> = lock(&self.kv)
+            .iter()
+            .filter(|((ns, key), _)| *ns == want_ns && _prefix.is_none_or(|p| key.starts_with(p)))
+            .map(|(_, record)| record.clone())
+            .collect();
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        rows.truncate(_limit);
+        Ok(rows)
     }
 
     async fn relations(
@@ -781,8 +865,7 @@ impl MemoryMaintenance for RecordingProvider {
 
     async fn degraded_state(
         &self,
-    ) -> Result<tinymemory_api::provider::diagnosis::DegradedCapabilities, MemoryError>
-    {
+    ) -> Result<tinymemory_api::provider::diagnosis::DegradedCapabilities, MemoryError> {
         self.record(Call::plain("maintenance.degraded_state"));
         Ok(Default::default())
     }
@@ -791,7 +874,7 @@ impl MemoryMaintenance for RecordingProvider {
 #[async_trait]
 impl MemoryProvider for RecordingProvider {
     fn driver_id(&self) -> &str {
-        "recording"
+        FULL_DRIVER_ID
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -972,8 +1055,7 @@ impl MemoryEpisodic for RecordingProvider {
     async fn session_turns(
         &self,
         _session_id: &str,
-    ) -> Result<Vec<tinymemory_api::provider::episodic::EpisodicTurn>, MemoryError>
-    {
+    ) -> Result<Vec<tinymemory_api::provider::episodic::EpisodicTurn>, MemoryError> {
         self.record(Call::plain("episodic.session_turns"));
         Ok(vec![])
     }
@@ -981,10 +1063,7 @@ impl MemoryEpisodic for RecordingProvider {
     async fn open_segment(
         &self,
         _session_id: &str,
-    ) -> Result<
-        Option<tinymemory_api::provider::episodic::ConversationSegment>,
-        MemoryError,
-    > {
+    ) -> Result<Option<tinymemory_api::provider::episodic::ConversationSegment>, MemoryError> {
         self.record(Call::plain("episodic.open_segment"));
         Ok(None)
     }
@@ -1166,8 +1245,7 @@ impl MemoryChunks for RecordingProvider {
     async fn chunk_score(
         &self,
         _chunk_id: &str,
-    ) -> Result<Option<tinymemory_api::provider::chunks::ChunkScore>, MemoryError>
-    {
+    ) -> Result<Option<tinymemory_api::provider::chunks::ChunkScore>, MemoryError> {
         self.record(Call::plain("chunks.chunk_score"));
         Ok(None)
     }
@@ -1175,8 +1253,7 @@ impl MemoryChunks for RecordingProvider {
     async fn source_ingest_status(
         &self,
         _source_prefixes: &[tinymemory_api::provider::chunks::SourceIngestQuery],
-    ) -> Result<Vec<tinymemory_api::provider::chunks::SourceIngestStatus>, MemoryError>
-    {
+    ) -> Result<Vec<tinymemory_api::provider::chunks::SourceIngestStatus>, MemoryError> {
         self.record(Call::plain("chunks.source_ingest_status"));
         Ok(vec![])
     }
@@ -1196,7 +1273,7 @@ impl MemoryRetrieval for RecordingProvider {
             taint: None,
             scoped: Some(scope.is_some()),
         });
-        Ok(self.fast_retrieve_result.lock().unwrap().clone())
+        Ok(lock(&self.fast_retrieve_result).clone())
     }
 
     async fn cover_window(
@@ -1274,10 +1351,7 @@ impl MemoryRetrieval for RecordingProvider {
             taint: None,
             scoped: None,
         });
-        Ok(self
-            .namespace_hits
-            .lock()
-            .unwrap()
+        Ok(lock(&self.namespace_hits)
             .iter()
             .filter(|hit| hit.namespace == namespace)
             .take(limit)
@@ -1454,8 +1528,7 @@ impl MemoryAnswer for RecordingProvider {
     async fn answer(
         &self,
         _request: tinymemory_api::provider::operations::AnswerRequest,
-    ) -> Result<tinymemory_api::provider::operations::AnswerResponse, MemoryError>
-    {
+    ) -> Result<tinymemory_api::provider::operations::AnswerResponse, MemoryError> {
         self.record(Call {
             method: "answer.answer".into(),
             content: None,
