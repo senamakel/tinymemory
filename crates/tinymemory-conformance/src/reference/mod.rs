@@ -305,3 +305,6 @@ impl MemoryProvider for InMemoryProvider {
         MemoryHealth::Ready
     }
 }
+
+/// A driver that serves every optional family, for hosts testing above the contract.
+pub mod full;
