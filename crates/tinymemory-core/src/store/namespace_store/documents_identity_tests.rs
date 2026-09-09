@@ -283,6 +283,78 @@ async fn a_metadata_only_write_reaches_a_row_under_a_stale_key_too() {
     );
 }
 
+/// The per-key write lock serialises writers of one key only. A writer that
+/// resolved its row before the transaction can find, inside it, that another
+/// writer reached the same document through a different key and moved it
+/// meanwhile; the transaction re-checks the key itself so the upsert lands on
+/// the row instead of tripping the primary key.
+#[tokio::test]
+async fn the_write_transaction_rekeys_a_row_another_writer_moved_meanwhile() {
+    let (_tmp, memory) = open();
+    let namespace = "skill-github";
+    let stored_namespace = UnifiedMemory::sanitize_namespace(namespace);
+    memory
+        .upsert_document(input(
+            namespace,
+            "moved-key",
+            Some("github:9"),
+            "issue body v1",
+        ))
+        .await
+        .unwrap();
+
+    {
+        let conn = memory.conn.lock();
+        assert!(
+            UnifiedMemory::rekey_document_in_namespace(
+                &conn,
+                &stored_namespace,
+                "github:9",
+                "github:9"
+            )
+            .unwrap(),
+            "a row held under another key is moved under the key being written"
+        );
+        assert!(
+            !UnifiedMemory::rekey_document_in_namespace(
+                &conn,
+                &stored_namespace,
+                "github:9",
+                "github:9"
+            )
+            .unwrap(),
+            "a row already under the key is left alone"
+        );
+        assert!(
+            !UnifiedMemory::rekey_document_in_namespace(
+                &conn,
+                &stored_namespace,
+                "github:404",
+                "x"
+            )
+            .unwrap(),
+            "a document the namespace does not hold is nothing to re-key"
+        );
+    }
+
+    let stored = memory
+        .upsert_document(input(
+            namespace,
+            "github:9",
+            Some("github:9"),
+            "issue body v2",
+        ))
+        .await
+        .expect("the upsert lands on the moved row");
+    assert_eq!(stored, "github:9");
+    let rows = stored_rows(&memory, namespace);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].1.as_str(), rows[0].2.as_str()),
+        ("github:9", "issue body v2")
+    );
+}
+
 /// A blank requested id is no id: the write mints its own rather than making
 /// the empty string a primary key.
 #[tokio::test]

@@ -54,14 +54,21 @@ row two ways, and `documents.rs` resolves both before writing
 - no row has the key, but the requested id names a row of the **same**
   namespace → the same document under a stale key (providers keyed by title
   before openhuman#4953 while already passing their stable id). The row is
-  re-keyed inside the write transaction and updated. Before this, the insert
-  failed with `UNIQUE constraint failed: memory_docs.document_id` and a
-  provider that does not tolerate scope errors aborted every sync run that
-  reached the item (openhuman#6147);
+  re-keyed and updated. Before this, the insert failed with
+  `UNIQUE constraint failed: memory_docs.document_id` and a provider that does
+  not tolerate scope errors aborted every sync run that reached the item
+  (openhuman#6147);
 - the requested id belongs to a row in **another** namespace → a derived id
   is used and a warning logged. Ids are addressed per namespace everywhere
   else (`delete_document`, chunk and graph lookups), so a foreign row is not
   this document and never blocks the write.
+
+The resolution runs before the markdown sidecar is written and outside the
+connection lock, and the per-key write lock only serialises writers of *one*
+key — so which key the row carries is checked again inside the write
+transaction (`rekey_document_in_namespace`, one primary-key lookup per write),
+where a row the same document reached through another key is moved under the
+key being written before the upsert runs.
 
 - **`graph.rs`** — `graph_namespace` / `graph_global` upserts with attribute merging and evidence accumulation, plus namespace / global / cross-namespace queries and document-scoped relation removal.
 - **`query.rs`** — hybrid retrieval. Combines graph relevance, vector similarity, keyword overlap, episodic signal and freshness; exposes `query_namespace_*` (with query) and `recall_namespace_*` (query-less) entry points used by `MemoryClient`.
