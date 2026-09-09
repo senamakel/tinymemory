@@ -182,6 +182,61 @@ async fn store_skill_sync_with_secret_like_title_uses_stable_document_id_as_key(
 }
 
 #[tokio::test]
+async fn store_skill_sync_updates_a_row_written_before_the_stable_key_rule() {
+    // Regression for openhuman#6147. Before openhuman#4953 a Composio
+    // provider's document was keyed by its TITLE while already carrying the
+    // stable `{toolkit}:{id}` as its document id; since then the key is that
+    // id. A pre-#4953 row whose item is updated later is re-fetched and
+    // written under the new key: a new `(namespace, key)` whose requested id
+    // the old row still holds. The insert used to fail with
+    // `upsert memory_docs: UNIQUE constraint failed: memory_docs.document_id`;
+    // the GitHub pipeline does not tolerate scope errors, so the whole sync
+    // run aborted and, its cursor never advancing, aborted again every tick.
+    let (_tmp, client) = make_client();
+    let stable_id = "github:4892120323";
+    let title = "feat(rewards): surface the Rewards page";
+
+    // The pre-#4953 write: title as key, stable id as document id.
+    let mut legacy = doc("skill-github", title, "issue body v1");
+    legacy.document_id = Some(stable_id.to_string());
+    legacy.taint = crate::MemoryTaint::ExternalSync;
+    assert_eq!(client.put_doc(legacy).await.unwrap(), stable_id);
+
+    client
+        .store_skill_sync(
+            "github",
+            "conn-1",
+            title,
+            "issue body v2",
+            Some("tinycortex-sync".into()),
+            None,
+            Some("medium".into()),
+            None,
+            None,
+            Some(stable_id.into()),
+        )
+        .await
+        .expect("a re-sync of an item stored under its title must update it in place");
+
+    let docs = client.list_documents(Some("skill-github")).await.unwrap();
+    let arr = docs
+        .get("documents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        arr.len(),
+        1,
+        "the re-sync must update the legacy row, not duplicate it"
+    );
+    assert_eq!(arr[0]["documentId"], stable_id);
+    assert_eq!(
+        arr[0]["key"], stable_id,
+        "the row is re-keyed to the stable id"
+    );
+}
+
+#[tokio::test]
 async fn clear_skill_memory_targets_prefixed_namespace() {
     let (_tmp, client) = make_client();
     // `store_skill_sync` prefixes the namespace with "skill-<id>".
