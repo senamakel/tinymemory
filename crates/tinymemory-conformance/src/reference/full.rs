@@ -36,9 +36,9 @@ use tinymemory_api::recall::OwnedRecallOpts;
 use tinymemory_api::tool_memory::ToolMemoryRule;
 use tinymemory_api::tree::{IngestRequest, QueryResult, TreeStatus};
 use tinymemory_api::types::{
-    GraphRelationRecord, MemoryCategory, MemoryEntry, MemoryKvRecord, MemoryTaint,
+    GraphRelationRecord, MemoryCategory, MemoryEntry, MemoryItemKind, MemoryKvRecord, MemoryTaint,
     NamespaceDocumentInput, NamespaceMemoryHit, NamespaceRetrievalContext, NamespaceSummary,
-    StoredMemoryDocument,
+    RetrievalScoreBreakdown, StoredMemoryDocument,
 };
 
 /// A relation's upsert key: its namespace and the triple it asserts.
@@ -679,14 +679,75 @@ impl MemoryDocuments for RecordingProvider {
     async fn recall_documents(
         &self,
         namespace: &str,
-        _limit: usize,
+        limit: usize,
     ) -> Result<NamespaceRetrievalContext, MemoryError> {
         self.record(Call::plain("documents.recall_documents"));
+        // Query-less recall over the documents this driver holds.
+        //
+        // It used to answer an empty context unconditionally, which for a
+        // namespace holding documents is the write-only shape again, reached
+        // through a different reader: `put_document` accepted the write and
+        // this said the namespace was empty. The contract's "an empty
+        // namespace returns empty context" carries the converse.
+        //
+        // Freshness is the whole of the ranking here, and deliberately so. The
+        // contract calls this "the namespace's freshness and priority
+        // ranking"; freshness is `updated_at`, which any driver storing
+        // documents has, whereas how priority *weighs against* it is a scoring
+        // model this driver has no business inventing. So `priority` breaks
+        // ties and nothing more, and `score` stays 0.0 rather than a number
+        // that would look like a ranking signal a caller could sort on.
+        let docs = lock(&self.documents);
+        let mut rows: Vec<&StoredMemoryDocument> = docs
+            .values()
+            .filter(|doc| doc.namespace == namespace)
+            .collect();
+        rows.sort_by(|a, b| {
+            b.updated_at
+                .total_cmp(&a.updated_at)
+                .then_with(|| a.priority.cmp(&b.priority))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        rows.truncate(limit);
+        let hits: Vec<NamespaceMemoryHit> = rows
+            .iter()
+            .map(|d| NamespaceMemoryHit {
+                id: d.document_id.clone(),
+                kind: MemoryItemKind::Document,
+                namespace: d.namespace.clone(),
+                key: d.key.clone(),
+                title: Some(d.title.clone()),
+                content: d.content.clone(),
+                category: d.category.clone(),
+                source_type: Some(d.source_type.clone()),
+                updated_at: d.updated_at,
+                score: 0.0,
+                score_breakdown: RetrievalScoreBreakdown::default(),
+                document_id: Some(d.document_id.clone()),
+                chunk_id: None,
+                supporting_relations: Vec::new(),
+                taint: d.taint,
+            })
+            .collect();
+        // `context_text` is documented as "assembled from `hits`", so it is
+        // assembled from them rather than rendered independently — the two
+        // disagreeing is the defect the field's own doc comment warns about.
+        let context_text = hits
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{}\n{}",
+                    hit.title.as_deref().unwrap_or(&hit.key),
+                    hit.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
         Ok(NamespaceRetrievalContext {
             namespace: namespace.to_string(),
             query: None,
-            context_text: String::new(),
-            hits: vec![],
+            context_text,
+            hits,
         })
     }
 }

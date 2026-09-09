@@ -941,6 +941,40 @@ pub async fn assert_documents_round_trip(provider: &dyn MemoryProvider) {
         "{who}: list_documents returned a row under a different namespace"
     );
 
+    // Query-less recall must see a document the namespace holds. The contract
+    // says "an empty namespace returns empty context", and this is the
+    // converse: a driver that accepted `put_document` and then reports the
+    // namespace as empty here has a family that is readable through one
+    // accessor and blank through another.
+    //
+    // `Unsupported` is tolerated because the method's own error note says a
+    // provider predating this optional operation answers exactly that. What is
+    // not tolerated is `Ok` with nothing in it.
+    //
+    // Ranking is not asserted. The contract calls this a freshness-and-priority
+    // ranking, and how a driver weighs those is its own model — this checks
+    // that the document is *reachable*, not where it placed.
+    match documents.recall_documents(&namespace, 10).await {
+        Err(MemoryError::Unsupported { .. }) => {}
+        Err(other) => panic!("{who}: recall_documents failed: {other}"),
+        Ok(recalled) => {
+            assert!(
+                !recalled.hits.is_empty(),
+                "{who}: recall_documents returned no hits for a namespace holding a document"
+            );
+            assert!(
+                !recalled.context_text.is_empty(),
+                "{who}: recall_documents returned empty context_text while reporting {} hits — \
+                 the rendered text is documented as assembled from those hits",
+                recalled.hits.len()
+            );
+            assert!(
+                recalled.hits.iter().any(|hit| hit.key == key),
+                "{who}: recall_documents hits do not include the document that was written"
+            );
+        }
+    }
+
     // The second — and last — untyped payload in the contract. Same reasoning
     // as the envelope above: `delete_document` answers a `serde_json::Value`,
     // so the three fields a caller reads are pinned here or nowhere. A host
