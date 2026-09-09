@@ -41,6 +41,12 @@ use tinymemory_api::types::{
     StoredMemoryDocument,
 };
 
+/// A relation's upsert key: its namespace and the triple it asserts.
+type RelationKey = (Option<String>, String, String, String);
+
+/// Relations held by [`RecordingProvider`], keyed by [`RelationKey`].
+type RelationRows = std::collections::HashMap<RelationKey, GraphRelationRecord>;
+
 /// The driver id [`RecordingProvider`] binds under.
 pub const FULL_DRIVER_ID: &str = "recording";
 
@@ -109,6 +115,13 @@ pub struct RecordingProvider {
     documents: Mutex<std::collections::HashMap<(String, String), StoredMemoryDocument>>,
     /// Rows written through [`MemoryGraph::kv_put`].
     kv: Mutex<std::collections::HashMap<(Option<String>, String), MemoryKvRecord>>,
+    /// Relations written through [`MemoryGraph::put_relation`], keyed on the
+    /// triple the contract upserts on.
+    relations: Mutex<RelationRows>,
+    /// Rules written through [`MemoryToolMemory::put_tool_rule`], keyed by id.
+    tool_rules: Mutex<std::collections::HashMap<String, ToolMemoryRule>>,
+    /// The document written through [`MemoryGoals::set_goals`].
+    goals: Mutex<Option<GoalsDoc>>,
     /// Entries written through [`MemoryCore::store`], keyed the way the
     /// contract upserts them.
     ///
@@ -137,6 +150,9 @@ impl RecordingProvider {
             namespace_summaries: Mutex::new(Vec::new()),
             documents: Mutex::new(std::collections::HashMap::new()),
             kv: Mutex::new(std::collections::HashMap::new()),
+            relations: Mutex::new(std::collections::HashMap::new()),
+            tool_rules: Mutex::new(std::collections::HashMap::new()),
+            goals: Mutex::new(None),
             entries: Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -544,7 +560,29 @@ impl MemoryDocuments for RecordingProvider {
         _namespace: Option<&str>,
     ) -> Result<serde_json::Value, MemoryError> {
         self.record(Call::plain("documents.list_documents"));
-        Ok(serde_json::json!({"documents": []}))
+        let docs = lock(&self.documents);
+        let mut rows: Vec<&StoredMemoryDocument> = docs
+            .iter()
+            .filter(|((ns, _), _)| _namespace.is_none_or(|want| ns == want))
+            .map(|(_, doc)| doc)
+            .collect();
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(serde_json::json!({
+            "documents": rows
+                .into_iter()
+                .map(|d| serde_json::json!({
+                    "document_id": d.document_id,
+                    "namespace": d.namespace,
+                    "key": d.key,
+                    "title": d.title,
+                    "content": d.content,
+                    "source_type": d.source_type,
+                    "priority": d.priority,
+                    "tags": d.tags,
+                    "category": d.category,
+                }))
+                .collect::<Vec<_>>()
+        }))
     }
 
     async fn list_namespaces(&self) -> Result<Vec<String>, MemoryError> {
@@ -870,11 +908,32 @@ impl MemoryGraph for RecordingProvider {
         _limit: usize,
     ) -> Result<Vec<GraphRelationRecord>, MemoryError> {
         self.record(Call::plain("graph.relations"));
-        Ok(vec![])
+        let want_ns = _namespace.map(str::to_string);
+        let mut rows: Vec<GraphRelationRecord> = lock(&self.relations)
+            .values()
+            .filter(|r| _namespace.is_none() || r.namespace == want_ns)
+            .filter(|r| _subject.is_none_or(|s| r.subject == s))
+            .filter(|r| _predicate.is_none_or(|p| r.predicate == p))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| {
+            (&a.subject, &a.predicate, &a.object).cmp(&(&b.subject, &b.predicate, &b.object))
+        });
+        rows.truncate(_limit);
+        Ok(rows)
     }
 
-    async fn put_relation(&self, _relation: GraphRelationRecord) -> Result<(), MemoryError> {
+    async fn put_relation(&self, relation: GraphRelationRecord) -> Result<(), MemoryError> {
         self.record(Call::plain("graph.put_relation"));
+        lock(&self.relations).insert(
+            (
+                relation.namespace.clone(),
+                relation.subject.clone(),
+                relation.predicate.clone(),
+                relation.object.clone(),
+            ),
+            relation,
+        );
         Ok(())
     }
 }
@@ -910,34 +969,47 @@ impl MemoryDiff for RecordingProvider {
 impl MemoryGoals for RecordingProvider {
     async fn goals(&self) -> Result<GoalsDoc, MemoryError> {
         self.record(Call::plain("goals.goals"));
-        Ok(GoalsDoc::default())
+        Ok(lock(&self.goals).clone().unwrap_or_default())
     }
 
-    async fn set_goals(&self, _goals: GoalsDoc) -> Result<(), MemoryError> {
+    async fn set_goals(&self, goals: GoalsDoc) -> Result<(), MemoryError> {
         self.record(Call::plain("goals.set_goals"));
+        *lock(&self.goals) = Some(goals);
         Ok(())
     }
 }
 
 #[async_trait]
 impl MemoryToolMemory for RecordingProvider {
-    async fn tool_rules(&self, _tool_name: &str) -> Result<Vec<ToolMemoryRule>, MemoryError> {
+    async fn tool_rules(&self, tool_name: &str) -> Result<Vec<ToolMemoryRule>, MemoryError> {
         self.record(Call::plain("tool_memory.tool_rules"));
-        Ok(vec![])
+        let mut rows: Vec<ToolMemoryRule> = lock(&self.tool_rules)
+            .values()
+            .filter(|r| r.tool_name == tool_name)
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(rows)
     }
 
-    async fn put_tool_rule(&self, _rule: ToolMemoryRule) -> Result<(), MemoryError> {
+    async fn put_tool_rule(&self, rule: ToolMemoryRule) -> Result<(), MemoryError> {
         self.record(Call::plain("tool_memory.put_tool_rule"));
+        lock(&self.tool_rules).insert(rule.id.clone(), rule);
         Ok(())
     }
 
-    async fn delete_tool_rule(
-        &self,
-        _tool_name: &str,
-        _rule_id: &str,
-    ) -> Result<bool, MemoryError> {
+    async fn delete_tool_rule(&self, tool_name: &str, rule_id: &str) -> Result<bool, MemoryError> {
         self.record(Call::plain("tool_memory.delete_tool_rule"));
-        Ok(false)
+        let mut rules = lock(&self.tool_rules);
+        match rules.get(rule_id) {
+            Some(rule) if rule.tool_name == tool_name => {
+                rules.remove(rule_id);
+                Ok(true)
+            }
+            // Deleting by the wrong tool name is a miss, not a silent success:
+            // the id is unique but the pair is what the caller asserted.
+            _ => Ok(false),
+        }
     }
 }
 #[async_trait]
