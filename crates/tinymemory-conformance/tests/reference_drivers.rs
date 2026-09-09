@@ -45,3 +45,30 @@ async fn the_reference_driver_advertises_exactly_the_mandatory_families() {
     assert!(provider.as_graph().is_none());
     assert!(provider.as_ingest().is_none());
 }
+
+/// The full driver is the third subject, and it is the one a *host* binds.
+///
+/// `InMemoryProvider` proves the assertions are right; `NullMemoryProvider`
+/// proves which of them survive a driver that retains nothing. Neither answers
+/// the question this driver exists for: a host testing its own layer above the
+/// contract needs every optional family reachable, because its handlers ask for
+/// them by accessor and take the `None` arm as "unsupported" rather than as
+/// "empty". Running the same suite here keeps that convenience honest — a
+/// driver that serves 27 families still has to uphold the three mandatory ones.
+#[tokio::test]
+async fn the_full_driver_conforms() {
+    assert_provider(Arc::new(tinymemory_conformance::RecordingProvider::new())).await;
+}
+
+/// It advertises everything, which is the opposite of the reference driver's
+/// claim and has to stay that way for `audit_provider` to pass: a driver that
+/// advertised less than it serves fails the audit just as surely as one that
+/// advertises more.
+#[tokio::test]
+async fn the_full_driver_advertises_every_family() {
+    let provider = tinymemory_conformance::RecordingProvider::new();
+    assert!(provider.as_tree().is_some());
+    assert!(provider.as_chunks().is_some());
+    assert!(provider.as_documents().is_some());
+    assert!(provider.as_retrieval().is_some());
+}

@@ -168,15 +168,27 @@ jobs:
       # §E8. Enforce the repository's 80% floor over production sources only.
       # Test helpers and vendored code can make the aggregate look healthy
       # without exercising the libraries a release actually ships.
+      #
+      # `reference/full.rs` is excluded on the same ground, and it is the one
+      # exclusion here that needs its reasoning written down. It is a driver
+      # that exists to be bound by *other repositories'* test suites — it is
+      # what lets a host test its own layer above the contract without linking
+      # an engine. This workspace cannot exercise it without inventing suite
+      # assertions for every optional family, and every assertion added to
+      # `assert_provider` binds TinyCortex too (`full_provider_conformance`
+      # picks them up automatically), so "cover the double" would mean writing
+      # engine requirements to satisfy a coverage number. `reference/mod.rs` is
+      # deliberately NOT excluded: the suite drives it hard and it sits at ~90%,
+      # which is what a driver this workspace does own should look like.
       - name: Enforce production-source coverage
         run: |
           set -euo pipefail
           cargo llvm-cov --all-features --workspace \
-            --ignore-filename-regex '(^|/)(tests|vendor)/|(^|/)(test|tests|test_helpers|test_support|test_seams)\.rs$|(_test|_tests|_test_support)\.rs$|/crates/tinymemory-core/src/(engine/parity|tree/retrieval/benchmarks)\.rs$' \
+            --ignore-filename-regex '(^|/)(tests|vendor)/|(^|/)(test|tests|test_helpers|test_support|test_seams)\.rs$|(_test|_tests|_test_support)\.rs$|/crates/tinymemory-core/src/(engine/parity|tree/retrieval/benchmarks)\.rs$|/crates/tinymemory-conformance/src/reference/full\.rs$' \
             --fail-under-lines 80 --summary-only \
             | tee "$GITHUB_STEP_SUMMARY"
           cargo llvm-cov report \
-            --ignore-filename-regex '(^|/)(tests|vendor)/|(^|/)(test|tests|test_helpers|test_support|test_seams)\.rs$|(_test|_tests|_test_support)\.rs$|/crates/tinymemory-core/src/(engine/parity|tree/retrieval/benchmarks)\.rs$' \
+            --ignore-filename-regex '(^|/)(tests|vendor)/|(^|/)(test|tests|test_helpers|test_support|test_seams)\.rs$|(_test|_tests|_test_support)\.rs$|/crates/tinymemory-core/src/(engine/parity|tree/retrieval/benchmarks)\.rs$|/crates/tinymemory-conformance/src/reference/full\.rs$' \
             --json --output-path target/production-coverage.json
           test_decl_line="$(grep -n '#\[cfg(test)\]' \
             crates/tinymemory-api/src/host/local_ai.rs | tail -1 | cut -d: -f1)"
@@ -358,7 +370,7 @@ jobs:
           set -euo pipefail
           cargo llvm-cov --manifest-path crates/tinymemory-module/Cargo.toml \
             --workspace --all-features \
-            --ignore-filename-regex '(^|/)(tests|vendor)/|(^|/)(test|tests|test_helpers|test_support|test_seams)\.rs$|(_test|_tests|_test_support)\.rs$|/crates/tinymemory-core/src/(engine/parity|tree/retrieval/benchmarks)\.rs$' \
+            --ignore-filename-regex '(^|/)(tests|vendor)/|(^|/)(test|tests|test_helpers|test_support|test_seams)\.rs$|(_test|_tests|_test_support)\.rs$|/crates/tinymemory-core/src/(engine/parity|tree/retrieval/benchmarks)\.rs$|/crates/tinymemory-conformance/src/reference/full\.rs$' \
             --fail-under-lines 80 --summary-only \
             | tee "$GITHUB_STEP_SUMMARY"
 

@@ -120,6 +120,13 @@ pub use tinymemory_bus::{
     capabilities, chunks, composio, error, evidence, goals, graph, health, learning, namespace,
     operations, recall, tool_memory, tree, types, version, wire,
 };
+// `chrono` rides the same rule for the same reason. Two trait methods on
+// `provider::MemoryTree` — `runtime_buffer_write` and `runtime_summarize` — take
+// a `DateTime<Utc>` in their signature, so *implementing* the contract requires
+// naming the type, and a driver crate that depends on this one and nothing else
+// had no path to it. Forwarding the re-export is what makes "depend on the
+// contract alone" true for an implementor rather than only for a caller.
+pub use tinymemory_bus::chrono;
 /// The mandatory-family composition: wrap any [`traits::Memory`] backend as a
 /// complete [`provider::MemoryProvider`].
 ///
