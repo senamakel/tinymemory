@@ -109,6 +109,14 @@ pub struct RecordingProvider {
     documents: Mutex<std::collections::HashMap<(String, String), StoredMemoryDocument>>,
     /// Rows written through [`MemoryGraph::kv_put`].
     kv: Mutex<std::collections::HashMap<(Option<String>, String), MemoryKvRecord>>,
+    /// Entries written through [`MemoryCore::store`], keyed the way the
+    /// contract upserts them.
+    ///
+    /// Without this the driver accepted writes and discarded them, which the
+    /// suite treats as a legitimate `/dev/null` binding — so `retains_writes`
+    /// probed false and `assert_provider` skipped every storage assertion. It
+    /// passed, vacuously. See `the_full_driver_retains_writes`.
+    entries: Mutex<std::collections::HashMap<(String, String), MemoryEntry>>,
 }
 
 impl Default for RecordingProvider {
@@ -129,6 +137,7 @@ impl RecordingProvider {
             namespace_summaries: Mutex::new(Vec::new()),
             documents: Mutex::new(std::collections::HashMap::new()),
             kv: Mutex::new(std::collections::HashMap::new()),
+            entries: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -248,11 +257,11 @@ pub fn document(content: &str, taint: MemoryTaint) -> NamespaceDocumentInput {
 impl MemoryCore for RecordingProvider {
     async fn store(
         &self,
-        _namespace: &str,
-        _key: &str,
+        namespace: &str,
+        key: &str,
         content: &str,
-        _category: MemoryCategory,
-        _session_id: Option<&str>,
+        category: MemoryCategory,
+        session_id: Option<&str>,
         taint: MemoryTaint,
     ) -> Result<(), MemoryError> {
         self.record(Call {
@@ -261,32 +270,85 @@ impl MemoryCore for RecordingProvider {
             taint: Some(taint),
             scoped: None,
         });
+        lock(&self.entries).insert(
+            (namespace.to_string(), key.to_string()),
+            MemoryEntry {
+                id: format!("{namespace}::{key}"),
+                key: key.to_string(),
+                content: content.to_string(),
+                namespace: Some(namespace.to_string()),
+                category,
+                timestamp: "1970-01-01T00:00:00Z".to_string(),
+                session_id: session_id.map(str::to_owned),
+                score: None,
+                // Persisted as given. A driver that re-stamped this would
+                // launder external content into internal-trust content, which
+                // is the failure the parameter exists to prevent.
+                taint,
+            },
+        );
         Ok(())
     }
 
-    async fn get(&self, _namespace: &str, _key: &str) -> Result<Option<MemoryEntry>, MemoryError> {
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<MemoryEntry>, MemoryError> {
         self.record(Call::plain("core.get"));
-        Ok(None)
+        Ok(lock(&self.entries)
+            .get(&(namespace.to_string(), key.to_string()))
+            .cloned())
     }
 
-    async fn forget(&self, _namespace: &str, _key: &str) -> Result<bool, MemoryError> {
+    async fn forget(&self, namespace: &str, key: &str) -> Result<bool, MemoryError> {
         self.record(Call::plain("core.forget"));
-        Ok(false)
+        Ok(lock(&self.entries)
+            .remove(&(namespace.to_string(), key.to_string()))
+            .is_some())
     }
 
+    // Namespace, category and session are the contract's own isolation rules
+    // rather than query semantics, so they are applied. Nothing else is: this
+    // driver does not rank, score or search.
     async fn list(
         &self,
-        _namespace: Option<&str>,
-        _category: Option<&MemoryCategory>,
-        _session_id: Option<&str>,
+        namespace: Option<&str>,
+        category: Option<&MemoryCategory>,
+        session_id: Option<&str>,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
         self.record(Call::plain("core.list"));
-        Ok(vec![])
+        let mut rows: Vec<MemoryEntry> = lock(&self.entries)
+            .values()
+            .filter(|e| namespace.is_none_or(|ns| e.namespace.as_deref() == Some(ns)))
+            .filter(|e| category.is_none_or(|c| &e.category == c))
+            .filter(|e| session_id.is_none_or(|s| e.session_id.as_deref() == Some(s)))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(rows)
     }
 
+    // The canned answer wins when a caller set one — several host tests drive a
+    // known namespace count without writing rows. Otherwise it is derived, so a
+    // driver that stored something never reports an empty workspace.
     async fn namespaces(&self) -> Result<Vec<NamespaceSummary>, MemoryError> {
         self.record(Call::plain("core.namespaces"));
-        Ok(lock(&self.namespace_summaries).clone())
+        let canned = lock(&self.namespace_summaries).clone();
+        if !canned.is_empty() {
+            return Ok(canned);
+        }
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for entry in lock(&self.entries).values() {
+            if let Some(ns) = entry.namespace.as_deref() {
+                *counts.entry(ns.to_string()).or_default() += 1;
+            }
+        }
+        Ok(counts
+            .into_iter()
+            .map(|(namespace, count)| NamespaceSummary {
+                namespace,
+                count,
+                last_updated: None,
+            })
+            .collect())
     }
 }
 
@@ -305,7 +367,35 @@ impl MemoryRecall for RecordingProvider {
             taint: None,
             scoped: Some(scope.is_some()),
         });
-        Ok(lock(&self.recall_result).clone())
+        // The canned answer wins when a caller set one — budget and auto-recall
+        // tests drive a known result set without writing rows.
+        let canned = lock(&self.recall_result).clone();
+        if !canned.is_empty() {
+            return Ok(canned);
+        }
+        // Otherwise recall what was stored. This is a case-insensitive
+        // substring match over content, exactly as `InMemoryProvider` does and
+        // for the same stated reason: it is enough for "did the write land and
+        // come back", and deliberately **not** enough to test ranking. A test
+        // about ordering wants a real engine.
+        if scope.is_some_and(SourceScope::is_empty) {
+            return Ok(Vec::new());
+        }
+        let needle = query.to_lowercase();
+        let mut hits: Vec<MemoryEntry> = lock(&self.entries)
+            .values()
+            .filter(|e| {
+                _opts
+                    .namespace
+                    .as_deref()
+                    .is_none_or(|ns| e.namespace.as_deref() == Some(ns))
+            })
+            .filter(|e| e.content.to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
+        hits.sort_by(|a, b| a.id.cmp(&b.id));
+        hits.truncate(_limit);
+        Ok(hits)
     }
 }
 
@@ -319,15 +409,12 @@ impl MemoryPortability for RecordingProvider {
     async fn export_page(
         &self,
         cursor: Option<&str>,
-        _limit: usize,
+        limit: usize,
     ) -> Result<ExportPage, MemoryError> {
         self.record(Call::plain("portability.export_page"));
-        if let Some(cursor) = cursor {
-            return Err(MemoryError::Invalid(format!(
-                "unrecognised export cursor: {cursor}"
-            )));
-        }
-        Ok(ExportPage::default())
+        let mut rows: Vec<MemoryEntry> = lock(&self.entries).values().cloned().collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        super::export_entries_page(&rows, cursor, limit)
     }
 
     async fn import_records(
@@ -340,7 +427,38 @@ impl MemoryPortability for RecordingProvider {
             taint: records.first().map(|r| r.taint),
             scoped: None,
         });
-        Ok(ImportOutcome::default())
+        let mut outcome = ImportOutcome::default();
+        for record in &records {
+            let Some((namespace, key, content, category, session_id)) =
+                super::decode_export_record(record)
+            else {
+                // Per-record rejection is reported, not returned as an error: a
+                // migration must not abort a whole restore over one bad row.
+                outcome.failed += 1;
+                outcome
+                    .errors
+                    .push(format!("record {} lacks a namespace or key", record.id));
+                continue;
+            };
+            lock(&self.entries).insert(
+                (namespace.clone(), key.clone()),
+                MemoryEntry {
+                    id: format!("{namespace}::{key}"),
+                    key,
+                    content,
+                    namespace: Some(namespace),
+                    category,
+                    timestamp: "1970-01-01T00:00:00Z".to_string(),
+                    session_id,
+                    score: None,
+                    // Carried from the record. Re-stamping on import is how a
+                    // restore launders external content into internal trust.
+                    taint: record.taint,
+                },
+            );
+            outcome.imported += 1;
+        }
+        Ok(outcome)
     }
 }
 

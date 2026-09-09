@@ -46,6 +46,92 @@ type Rows = BTreeMap<(String, String), MemoryEntry>;
 /// A held lock over [`Rows`].
 type RowGuard<'a> = std::sync::MutexGuard<'a, Rows>;
 
+/// Render a page of entries as export records.
+///
+/// Shared by both drivers in this module. The portability tier is pure
+/// translation over whatever the driver holds — the cursor arithmetic, the
+/// `Invalid` on an unrecognised cursor, and the `None`-terminates rule are the
+/// contract's, not any one driver's — so writing it twice would be two chances
+/// to get the terminator wrong in different ways.
+///
+/// `rows` must be a stable order; both callers sort by id.
+///
+/// # Errors
+///
+/// [`MemoryError::Invalid`] when `cursor` is not one this driver issued.
+pub(crate) fn export_entries_page(
+    rows: &[MemoryEntry],
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<ExportPage, MemoryError> {
+    let offset: usize = match cursor {
+        None => 0,
+        Some(raw) => raw
+            .parse()
+            .map_err(|_| MemoryError::Invalid(format!("unknown export cursor: {raw}")))?,
+    };
+    let take = limit.clamp(1, MAX_PAGE);
+    let records: Vec<ExportRecord> = rows
+        .iter()
+        .skip(offset)
+        .take(take)
+        .map(|e| ExportRecord {
+            kind: "entry".to_string(),
+            id: e.id.clone(),
+            namespace: e.namespace.clone(),
+            taint: e.taint,
+            payload: serde_json::json!({
+                "key": e.key,
+                "content": e.content,
+                "category": e.category.to_string(),
+                "session_id": e.session_id,
+            }),
+        })
+        .collect();
+    let consumed = offset + records.len();
+    // `None` terminates, not an empty page — the contract is explicit that an
+    // empty `records` is not the terminator.
+    let next_cursor = (consumed < rows.len()).then(|| consumed.to_string());
+    Ok(ExportPage {
+        records,
+        next_cursor,
+    })
+}
+
+/// Decode one export record back into the fields [`MemoryCore::store`] takes.
+///
+/// `None` means the record is unusable and the caller should count it against
+/// [`ImportOutcome::failed`] rather than failing the whole restore — a
+/// migration must not abort over one bad row.
+pub(crate) fn decode_export_record(
+    record: &ExportRecord,
+) -> Option<(String, String, String, MemoryCategory, Option<String>)> {
+    let namespace = record.namespace.clone()?;
+    let key = record
+        .payload
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)?;
+    let content = record
+        .payload
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let category = record
+        .payload
+        .get("category")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(MemoryCategory::Core);
+    let session_id = record
+        .payload
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    Some((namespace, key, content, category, session_id))
+}
+
 /// An in-memory [`MemoryProvider`], keyed exactly as the contract specifies.
 #[derive(Debug, Default)]
 pub struct InMemoryProvider {
@@ -195,43 +281,8 @@ impl MemoryPortability for InMemoryProvider {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<ExportPage, MemoryError> {
-        // The cursor is an offset rendered as a decimal string. A cursor this
-        // driver did not issue is `Invalid`, not a silent restart from zero —
-        // silently restarting would make a resumed export duplicate everything
-        // it had already written.
-        let offset: usize = match cursor {
-            None => 0,
-            Some(raw) => raw
-                .parse()
-                .map_err(|_| MemoryError::Invalid(format!("unknown export cursor: {raw}")))?,
-        };
-        let rows = self.rows()?;
-        let take = limit.clamp(1, MAX_PAGE);
-        let records: Vec<ExportRecord> = rows
-            .values()
-            .skip(offset)
-            .take(take)
-            .map(|e| ExportRecord {
-                kind: "entry".to_string(),
-                id: e.id.clone(),
-                namespace: e.namespace.clone(),
-                taint: e.taint,
-                payload: serde_json::json!({
-                    "key": e.key,
-                    "content": e.content,
-                    "category": e.category.to_string(),
-                    "session_id": e.session_id,
-                }),
-            })
-            .collect();
-        let consumed = offset + records.len();
-        // `None` terminates, not an empty page — the contract is explicit that
-        // an empty `records` is not the terminator.
-        let next_cursor = (consumed < rows.len()).then(|| consumed.to_string());
-        Ok(ExportPage {
-            records,
-            next_cursor,
-        })
+        let rows: Vec<MemoryEntry> = self.rows()?.values().cloned().collect();
+        export_entries_page(&rows, cursor, limit)
     }
 
     async fn import_records(
@@ -239,15 +290,10 @@ impl MemoryPortability for InMemoryProvider {
         records: Vec<ExportRecord>,
     ) -> Result<ImportOutcome, MemoryError> {
         let mut outcome = ImportOutcome::default();
-        for record in records {
-            let (Some(namespace), Some(key)) = (
-                record.namespace.clone(),
-                record
-                    .payload
-                    .get("key")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-            ) else {
+        for record in &records {
+            let Some((namespace, key, content, category, session_id)) =
+                decode_export_record(record)
+            else {
                 // Per-record rejection is reported, not returned as an error: a
                 // migration must not abort a whole restore over one bad row.
                 outcome.failed += 1;
@@ -256,24 +302,6 @@ impl MemoryPortability for InMemoryProvider {
                     .push(format!("record {} lacks a namespace or key", record.id));
                 continue;
             };
-            let content = record
-                .payload
-                .get("content")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let category = record
-                .payload
-                .get("category")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|c| c.parse().ok())
-                .unwrap_or(MemoryCategory::Core);
-            let session_id = record
-                .payload
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
-            // `record.taint` verbatim — see the note on `store`.
             self.store(
                 &namespace,
                 &key,

@@ -72,3 +72,25 @@ async fn the_full_driver_advertises_every_family() {
     assert!(provider.as_documents().is_some());
     assert!(provider.as_retrieval().is_some());
 }
+
+/// The full driver must actually retain, and this has to be asserted directly.
+///
+/// `assert_provider` skips every storage assertion when `retains_writes` probes
+/// false, because a driver that accepts writes and discards them is a
+/// legitimate binding — `NullMemoryProvider` is exactly that. The consequence
+/// is that a *double* which drops writes by accident passes the whole suite
+/// vacuously, which is precisely what happened here: the driver landed with
+/// `store` returning `Ok(())` and `get` returning `Ok(None)`, and
+/// `the_full_driver_conforms` went green having asserted nothing about storage.
+///
+/// The crate exports `retains_writes` for callers to catch this in their own
+/// harnesses. It is worth spending it on our own.
+#[tokio::test]
+async fn the_full_driver_retains_writes() {
+    let provider = tinymemory_conformance::RecordingProvider::new();
+    assert!(
+        tinymemory_conformance::retains_writes(&provider).await,
+        "the full driver dropped a write — assert_provider would then skip \
+         every storage assertion and pass vacuously"
+    );
+}
