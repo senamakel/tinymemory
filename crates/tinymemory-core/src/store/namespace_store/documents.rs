@@ -30,6 +30,35 @@ const DOCUMENT_CHUNK_MAX_TOKENS: usize = 225;
 /// fewer round-trips than the one-per-document write path it replaces.
 pub(crate) const EMBED_REQUEST_MAX_TEXTS: usize = 64;
 
+/// The row a document write addresses, resolved before anything is written.
+///
+/// Two identities can name a row: the `(namespace, key)` dedup key every
+/// write carries, and the document id — the table's primary key — when the
+/// caller supplies one. They can disagree, and `memory_docs` only upserts on
+/// the first: a write whose key is new but whose requested id an existing row
+/// holds used to fail on the primary key (openhuman#6147). Both write paths
+/// resolve the row up front so the row they update, the chunks they replace
+/// and the id they hand back all agree.
+enum DocumentIdentity {
+    /// A row of this namespace is this document: either it carries the
+    /// `(namespace, key)` — then its id wins over any requested one, because
+    /// the upsert's `DO UPDATE` never rewrites `document_id` and chunks
+    /// written under another id would be orphaned — or it carries the
+    /// requested id under another key, written when a different key rule
+    /// applied (sync providers keyed by title before openhuman#4953 while
+    /// already passing their stable id). The write transaction moves such a
+    /// row under the key being written ([`UnifiedMemory::rekey_document_in_namespace`]).
+    Existing {
+        document_id: String,
+        created_at: f64,
+    },
+    /// A new row. `document_id` is the requested id when it is free; `None`
+    /// when the write must mint one — nothing usable was requested, or the
+    /// requested id belongs to a row in another namespace, which is not this
+    /// document and must not block it.
+    New { document_id: Option<String> },
+}
+
 impl UnifiedMemory {
     /// Insert or update a document by `(namespace, key)`. Writes the markdown
     /// sidecar, replaces vector chunks, and embeds them with the configured
@@ -185,19 +214,16 @@ impl UnifiedMemory {
         let _write_guard = Self::document_write_lock(&self.db_path, &namespace, &key)
             .lock_owned()
             .await;
-        let existing_document_id = {
+        let now = Self::now_ts();
+        let identity = {
             let conn = self.conn.lock();
-            conn.query_row(
-                "SELECT document_id FROM memory_docs WHERE namespace = ?1 AND key = ?2 LIMIT 1",
-                params![namespace, key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|e| format!("lookup existing document_id: {e}"))?
+            Self::resolve_document_identity(&conn, &namespace, &key, input.document_id.as_deref())?
         };
-        let document_id = input
-            .document_id
-            .or(existing_document_id)
+        let (document_id, created_at) = match identity {
+            DocumentIdentity::Existing {
+                document_id,
+                created_at,
+            } => (document_id, created_at),
             // Derived from (namespace, key), NOT random. The lookup above and
             // the write below are separated by `.await`s, so two concurrent
             // stores of a not-yet-existing key both miss and both mint an id.
@@ -210,18 +236,10 @@ impl UnifiedMemory {
             // deleted. A deterministic id makes both writers choose the same
             // one, so the second write updates the first's chunks instead of
             // orphaning them.
-            .unwrap_or_else(|| Self::derive_document_id(&namespace, &key));
-        let now = Self::now_ts();
-        let created_at = {
-            let conn = self.conn.lock();
-            conn.query_row(
-                "SELECT created_at FROM memory_docs WHERE namespace = ?1 AND key = ?2 LIMIT 1",
-                params![namespace, key],
-                |row| row.get::<_, f64>(0),
-            )
-            .optional()
-            .map_err(|e| format!("lookup existing created_at: {e}"))?
-            .unwrap_or(now)
+            DocumentIdentity::New { document_id } => (
+                document_id.unwrap_or_else(|| Self::derive_document_id(&namespace, &key)),
+                now,
+            ),
         };
         let updated_at = now;
         let markdown_rel = self
@@ -249,6 +267,7 @@ impl UnifiedMemory {
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| format!("begin tx: {e}"))?;
+            Self::rekey_document_in_namespace(&tx, &namespace, &document_id, &key)?;
             tx.execute(
                 "INSERT INTO memory_docs
                   (document_id, namespace, key, title, content, source_type, priority, tags_json, metadata_json, category, session_id, created_at, updated_at, markdown_rel_path, taint, logical_namespace)
@@ -361,35 +380,24 @@ impl UnifiedMemory {
         let _write_guard = Self::document_write_lock(&self.db_path, &namespace, &key)
             .lock_owned()
             .await;
-        let existing_document_id = {
-            let conn = self.conn.lock();
-            conn.query_row(
-                "SELECT document_id FROM memory_docs WHERE namespace = ?1 AND key = ?2 LIMIT 1",
-                params![namespace, key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|e| format!("lookup existing document_id: {e}"))?
-        };
-        let document_id = input
-            .document_id
-            .or(existing_document_id)
-            .unwrap_or_else(|| {
-                let ts = Self::now_ts() as u64;
-                let short = &Uuid::new_v4().to_string()[..8];
-                format!("{ts}_{short}")
-            });
         let now = Self::now_ts();
-        let created_at = {
+        let identity = {
             let conn = self.conn.lock();
-            conn.query_row(
-                "SELECT created_at FROM memory_docs WHERE namespace = ?1 AND key = ?2 LIMIT 1",
-                params![namespace, key],
-                |row| row.get::<_, f64>(0),
-            )
-            .optional()
-            .map_err(|e| format!("lookup existing created_at: {e}"))?
-            .unwrap_or(now)
+            Self::resolve_document_identity(&conn, &namespace, &key, input.document_id.as_deref())?
+        };
+        let (document_id, created_at) = match identity {
+            DocumentIdentity::Existing {
+                document_id,
+                created_at,
+            } => (document_id, created_at),
+            DocumentIdentity::New { document_id } => (
+                document_id.unwrap_or_else(|| {
+                    let ts = Self::now_ts() as u64;
+                    let short = &Uuid::new_v4().to_string()[..8];
+                    format!("{ts}_{short}")
+                }),
+                now,
+            ),
         };
         let updated_at = now;
         let markdown_rel = self
@@ -412,7 +420,11 @@ impl UnifiedMemory {
 
         {
             let conn = self.conn.lock();
-            conn.execute(
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| format!("begin tx: {e}"))?;
+            Self::rekey_document_in_namespace(&tx, &namespace, &document_id, &key)?;
+            tx.execute(
                 "INSERT INTO memory_docs
                   (document_id, namespace, key, title, content, source_type, priority, tags_json, metadata_json, category, session_id, created_at, updated_at, markdown_rel_path, taint, logical_namespace)
                  VALUES
@@ -450,6 +462,7 @@ impl UnifiedMemory {
                 ],
             )
             .map_err(|e| format!("upsert memory_docs: {e}"))?;
+            tx.commit().map_err(|e| format!("commit tx: {e}"))?;
         }
 
         Ok(document_id)
@@ -853,6 +866,109 @@ impl UnifiedMemory {
         Arc::clone(table.entry(id).or_default())
     }
 
+    /// Resolve the row a write of `(namespace, key)` addresses; see
+    /// [`DocumentIdentity`] for the cases. `requested_id` is the caller's
+    /// `document_id`; it is trimmed, and a blank one is no request.
+    ///
+    /// Runs before the sidecar write, outside the connection lock, so it only
+    /// settles the id and `created_at`. Which key the row carries is checked
+    /// again inside the write transaction by
+    /// [`Self::rekey_document_in_namespace`].
+    fn resolve_document_identity(
+        conn: &rusqlite::Connection,
+        namespace: &str,
+        key: &str,
+        requested_id: Option<&str>,
+    ) -> Result<DocumentIdentity, String> {
+        let requested_id = requested_id.map(str::trim).filter(|id| !id.is_empty());
+        let by_key = conn
+            .query_row(
+                "SELECT document_id, created_at FROM memory_docs WHERE namespace = ?1 AND key = ?2 LIMIT 1",
+                params![namespace, key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("lookup existing document: {e}"))?;
+        if let Some((document_id, created_at)) = by_key {
+            if requested_id.is_some_and(|requested| requested != document_id) {
+                log::debug!(
+                    "[memory] document write keeps the row's id over the requested one namespace={namespace}"
+                );
+            }
+            return Ok(DocumentIdentity::Existing {
+                document_id,
+                created_at,
+            });
+        }
+        let Some(requested_id) = requested_id else {
+            return Ok(DocumentIdentity::New { document_id: None });
+        };
+        let owner = conn
+            .query_row(
+                "SELECT namespace, created_at FROM memory_docs WHERE document_id = ?1 LIMIT 1",
+                params![requested_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("lookup document id owner: {e}"))?;
+        Ok(match owner {
+            None => DocumentIdentity::New {
+                document_id: Some(requested_id.to_owned()),
+            },
+            Some((owner, created_at)) if owner == namespace => DocumentIdentity::Existing {
+                document_id: requested_id.to_owned(),
+                created_at,
+            },
+            Some((owner, _)) => {
+                log::warn!(
+                    "[memory] requested document id belongs to another namespace; storing under a derived id namespace={namespace} owner_namespace={owner}"
+                );
+                DocumentIdentity::New { document_id: None }
+            }
+        })
+    }
+
+    /// Inside the write transaction: if `namespace` holds the row
+    /// `document_id` under a key other than `key`, move it under `key`, so the
+    /// upsert that follows updates it through `ON CONFLICT(namespace, key)`
+    /// instead of inserting a second row the primary key then rejects.
+    ///
+    /// Checked here, at the moment of writing, rather than trusted from
+    /// [`Self::resolve_document_identity`]: that ran before the sidecar write
+    /// and outside the connection lock, and the per-key write lock only
+    /// serialises writers of *this* key. A writer addressing the same
+    /// document through another key can re-key the row in between, and the
+    /// upsert would then miss it. Every write pays one primary-key lookup for
+    /// that. Chunks, the markdown sidecar and graph relations are keyed by
+    /// the id and need no change. Returns whether the row was re-keyed.
+    fn rekey_document_in_namespace(
+        conn: &rusqlite::Connection,
+        namespace: &str,
+        document_id: &str,
+        key: &str,
+    ) -> Result<bool, String> {
+        let current_key = conn
+            .query_row(
+                "SELECT key FROM memory_docs WHERE namespace = ?1 AND document_id = ?2 LIMIT 1",
+                params![namespace, document_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("lookup document key: {e}"))?;
+        if current_key.as_deref().is_none_or(|current| current == key) {
+            return Ok(false);
+        }
+        conn.execute(
+            "UPDATE memory_docs SET key = ?1 WHERE namespace = ?2 AND document_id = ?3",
+            params![key, namespace, document_id],
+        )
+        .map_err(|e| format!("re-key memory_docs: {e}"))?;
+        log::info!(
+            "[memory] re-keyed a document to the key its write addressed it by namespace={namespace}"
+        );
+        Ok(true)
+    }
+
     /// A document id derived from `(namespace, key)`.
     ///
     /// Deterministic so two concurrent first-writes of one key agree, which is
@@ -889,3 +1005,7 @@ mod tests;
 #[cfg(test)]
 #[path = "documents_document_id_tests.rs"]
 mod document_id_tests;
+
+#[cfg(test)]
+#[path = "documents_identity_tests.rs"]
+mod identity_tests;
