@@ -96,6 +96,29 @@ impl Call {
     }
 }
 
+/// The entity kinds [`MemoryRetrieval::search_entities`] accepts in its filter,
+/// as enumerated by the contract's own module docs.
+///
+/// Request-side only. `EntityMatch::kind` in a *response* is an open
+/// vocabulary and must never be checked against this list.
+const KNOWN_ENTITY_KINDS: &[&str] = &[
+    "email",
+    "url",
+    "handle",
+    "hashtag",
+    "person",
+    "organization",
+    "location",
+    "event",
+    "product",
+    "datetime",
+    "technology",
+    "artifact",
+    "quantity",
+    "misc",
+    "topic",
+];
+
 /// A provider that records and answers with empties.
 pub struct RecordingProvider {
     calls: Mutex<Vec<Call>>,
@@ -1582,10 +1605,29 @@ impl MemoryRetrieval for RecordingProvider {
     async fn search_entities(
         &self,
         _query: &str,
-        _kinds: Option<&[String]>,
+        kinds: Option<&[String]>,
         _limit: usize,
     ) -> Result<Vec<EntityMatch>, MemoryError> {
         self.record(Call::plain("retrieval.search_entities"));
+        // Validating the filter is a contract obligation, not an engine
+        // nicety: `MemoryRetrieval::search_entities` documents `Invalid` for an
+        // unrecognised kind precisely because "silently matching nothing would
+        // look identical to a genuine empty result". This driver answers no
+        // matches, so it is the one driver where skipping the check is
+        // invisible — and answering `Ok(vec![])` to a typo is exactly the
+        // confusion the rule exists to prevent.
+        //
+        // The vocabulary is open on the *response* side (`EntityMatch::kind` is
+        // a passthrough string, so an engine may emit a kind this build has not
+        // heard of) and closed on the *request* side. `KNOWN_ENTITY_KINDS` is
+        // the request-side list the contract's module docs enumerate.
+        if let Some(kinds) = kinds {
+            for kind in kinds {
+                if !KNOWN_ENTITY_KINDS.contains(&kind.as_str()) {
+                    return Err(MemoryError::Invalid(format!("unknown entity kind: {kind}")));
+                }
+            }
+        }
         Ok(vec![])
     }
 }

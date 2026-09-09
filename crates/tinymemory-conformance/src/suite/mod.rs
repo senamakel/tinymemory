@@ -43,6 +43,7 @@ pub async fn assert_provider(provider: Arc<dyn MemoryProvider>) {
     assert_forget_is_idempotent(p).await;
     assert_namespaces_are_isolated(p).await;
     assert_export_cursor_terminates(p).await;
+    assert_search_entities_rejects_unknown_kind(p).await;
 
     // The contract permits a driver that accepts writes and discards them —
     // `NullMemoryProvider` is exactly that, and it is a legitimate binding for a
@@ -68,6 +69,53 @@ pub async fn assert_provider(provider: Arc<dyn MemoryProvider>) {
     assert_awkward_content_round_trips(p).await;
     assert_kv_round_trip(p).await;
     assert_documents_round_trip(p).await;
+}
+
+/// An unrecognised entity kind in `search_entities`' filter is `Invalid`.
+///
+/// This is a shape assertion, not a storage one — it applies to a driver that
+/// retains nothing just as much as to one that retains everything, which is why
+/// it runs above the [`retains_writes`] gate. A driver with an empty entity
+/// index is in fact the one where getting this wrong is *least* visible: every
+/// query answers `Ok(vec![])` whether the filter was a typo or not.
+///
+/// That is exactly what the contract's module docs say the rule exists to
+/// prevent — "silently matching nothing would look identical to a genuine empty
+/// result" — and it was found the way such rules usually are, from a host that
+/// got `[]` back for a misspelled kind and treated it as "no such entity".
+///
+/// Only the request side is checked. `EntityMatch::kind` in a *response* is an
+/// open vocabulary on purpose (a closed enum would make a newly-emitted kind a
+/// deserialization failure rather than an unfamiliar label), so nothing here
+/// asserts which kinds a driver *accepts* — engines legitimately differ, and a
+/// driver that grew a new one must not start failing this suite.
+///
+/// # Panics
+///
+/// Panics when the driver accepts a kind that cannot exist, or refuses it with
+/// a class other than [`MemoryError::Invalid`] — a `Backend` or `Unsupported`
+/// here is a failure wearing a refusal's clothes, the same distinction
+/// [`assert_awkward_content_round_trips`] draws.
+pub async fn assert_search_entities_rejects_unknown_kind(provider: &dyn MemoryProvider) {
+    let who = provider.driver_id();
+    let Some(retrieval) = provider.as_retrieval() else {
+        return;
+    };
+    // Not a plausible future kind: no engine can grow this one.
+    let bogus = ["definitely not an entity kind".to_string()];
+    match retrieval.search_entities("anything", Some(&bogus), 5).await {
+        Err(MemoryError::Invalid(_)) => {}
+        Ok(hits) => panic!(
+            "{who}: search_entities accepted an unrecognised kind and answered {} hits; \
+             an unknown kind must be Invalid, or a caller's typo is indistinguishable \
+             from an empty index",
+            hits.len()
+        ),
+        Err(other) => panic!(
+            "{who}: refusing an unrecognised entity kind must be Invalid (a validation \
+             refusal); got: {other}"
+        ),
+    }
 }
 
 /// Whether this driver reads back what it stores.
