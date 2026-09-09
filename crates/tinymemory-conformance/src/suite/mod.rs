@@ -28,7 +28,7 @@ use tinymemory_api::error::MemoryError;
 use tinymemory_api::namespace::Namespace;
 use tinymemory_api::provider::{audit_provider, ExportRecord, MemoryProvider, SourceScope};
 use tinymemory_api::recall::OwnedRecallOpts;
-use tinymemory_api::types::{MemoryCategory, MemoryTaint};
+use tinymemory_api::types::{MemoryCategory, MemoryTaint, NamespaceDocumentInput};
 
 /// Runs every assertion in the suite.
 ///
@@ -67,6 +67,7 @@ pub async fn assert_provider(provider: Arc<dyn MemoryProvider>) {
     assert_export_import_round_trip(p).await;
     assert_awkward_content_round_trips(p).await;
     assert_kv_round_trip(p).await;
+    assert_documents_round_trip(p).await;
 }
 
 /// Whether this driver reads back what it stores.
@@ -739,6 +740,108 @@ pub async fn assert_export_cursor_terminates(provider: &dyn MemoryProvider) {
     assert!(
         matches!(bogus, Err(MemoryError::Invalid(_))),
         "{who}: an unrecognised cursor must return Invalid, got {bogus:?}"
+    );
+}
+
+/// A document survives the `(namespace, key)` round trip, and a second write
+/// under the same key replaces it.
+///
+/// The document tier is not the entry tier, and a driver can get one right
+/// while getting the other wrong: entries go through `store`/`get`, documents
+/// through `put_document`/`get_document`, and nothing before this checked that
+/// the second pair upholds the same upsert rule as the first. A driver that
+/// appended instead of replacing would show a host two documents where its user
+/// wrote one, and the host cannot tell — it asked by key and got a list back.
+///
+/// What is deliberately *not* asserted: `document_id`, `created_at`,
+/// `updated_at` and `markdown_rel_path`. Those are the driver's to choose, and
+/// an engine that persists markdown legitimately fills the last one where an
+/// in-memory driver leaves it empty.
+///
+/// # Panics
+///
+/// Panics when a written document does not read back, when its fields do not
+/// survive, or when a same-key rewrite duplicates rather than replaces.
+pub async fn assert_documents_round_trip(provider: &dyn MemoryProvider) {
+    let who = provider.driver_id();
+    let Some(documents) = provider.as_documents() else {
+        return;
+    };
+    let namespace = ns(provider, "documents");
+    let key = "round-trip";
+
+    let write = |title: &str, content: &str| NamespaceDocumentInput {
+        namespace: namespace.clone(),
+        key: key.to_string(),
+        title: title.to_string(),
+        content: content.to_string(),
+        source_type: "conformance".into(),
+        priority: "normal".into(),
+        tags: vec!["conformance".into()],
+        metadata: serde_json::Value::Null,
+        category: "core".to_string(),
+        session_id: None,
+        document_id: None,
+        taint: MemoryTaint::ExternalSync,
+    };
+
+    documents
+        .put_document(write("first", "the first body"))
+        .await
+        .unwrap_or_else(|e| panic!("{who}: put_document failed: {e}"));
+
+    let stored = documents
+        .get_document(&namespace, key)
+        .await
+        .unwrap_or_else(|e| panic!("{who}: get_document failed: {e}"))
+        .unwrap_or_else(|| {
+            panic!("{who}: get_document did not find `{key}` right after put_document")
+        });
+    assert_eq!(
+        stored.content, "the first body",
+        "{who}: document content did not survive the round trip"
+    );
+    assert_eq!(
+        stored.namespace, namespace,
+        "{who}: document came back under a different namespace"
+    );
+    assert_eq!(
+        stored.key, key,
+        "{who}: document came back under a different key"
+    );
+    assert_eq!(
+        stored.taint,
+        MemoryTaint::ExternalSync,
+        "{who}: document taint was not preserved — external content has been \
+         laundered into internal-trust content"
+    );
+
+    // The upsert rule, which is the whole reason the key exists.
+    documents
+        .put_document(write("second", "the second body"))
+        .await
+        .unwrap_or_else(|e| panic!("{who}: the second put_document failed: {e}"));
+    let replaced = documents
+        .get_document(&namespace, key)
+        .await
+        .unwrap_or_else(|e| panic!("{who}: get_document after rewrite failed: {e}"))
+        .unwrap_or_else(|| panic!("{who}: the rewritten document is not readable"));
+    assert_eq!(
+        replaced.content, "the second body",
+        "{who}: a second write under the same key did not replace the first"
+    );
+
+    documents
+        .clear_namespace(&namespace)
+        .await
+        .unwrap_or_else(|e| panic!("{who}: clear_namespace failed: {e}"));
+    let gone = documents
+        .get_document(&namespace, key)
+        .await
+        .unwrap_or_else(|e| panic!("{who}: get_document after clear_namespace failed: {e}"));
+    assert!(
+        gone.is_none(),
+        "{who}: the document is still readable after clear_namespace"
     );
 }
 
