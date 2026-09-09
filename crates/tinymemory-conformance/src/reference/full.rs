@@ -382,6 +382,11 @@ impl MemoryRecall for RecordingProvider {
             return Ok(Vec::new());
         }
         let needle = query.to_lowercase();
+        // Namespace, category and session are the same isolation rules `list`
+        // applies, and recall has to apply them too: a caller that narrowed a
+        // recall by category and got rows from another one has been told
+        // something false about its own store. `min_score` is deliberately not
+        // honoured — that is ranking, and this driver does not rank.
         let mut hits: Vec<MemoryEntry> = lock(&self.entries)
             .values()
             .filter(|e| {
@@ -389,6 +394,13 @@ impl MemoryRecall for RecordingProvider {
                     .namespace
                     .as_deref()
                     .is_none_or(|ns| e.namespace.as_deref() == Some(ns))
+            })
+            .filter(|e| _opts.category.as_ref().is_none_or(|c| &e.category == c))
+            .filter(|e| {
+                _opts
+                    .session_id
+                    .as_deref()
+                    .is_none_or(|s| e.session_id.as_deref() == Some(s))
             })
             .filter(|e| e.content.to_lowercase().contains(&needle))
             .cloned()

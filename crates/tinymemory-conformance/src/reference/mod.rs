@@ -267,6 +267,14 @@ impl MemoryRecall for InMemoryProvider {
                     .as_deref()
                     .is_none_or(|ns| e.namespace.as_deref() == Some(ns))
             })
+            // The same isolation rules `list` applies. Recall narrowed by
+            // category or session must not return rows from another one.
+            .filter(|e| opts.category.as_ref().is_none_or(|c| &e.category == c))
+            .filter(|e| {
+                opts.session_id
+                    .as_deref()
+                    .is_none_or(|s| e.session_id.as_deref() == Some(s))
+            })
             .filter(|e| e.content.to_lowercase().contains(&needle))
             .take(limit)
             .cloned()
