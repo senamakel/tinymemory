@@ -640,7 +640,14 @@ impl MemoryDocuments for RecordingProvider {
             .find(|((ns, _), doc)| ns == namespace && doc.document_id == document_id)
             .map(|(k, _)| k.clone());
         let deleted = victim.is_some_and(|k| docs.remove(&k).is_some());
-        Ok(serde_json::json!({ "deleted": deleted }))
+        // The namespace and the id are echoed back because the contract's
+        // documented envelope carries them — this driver does not sanitise, so
+        // the namespace it reports is the one it was handed.
+        Ok(serde_json::json!({
+            "deleted": deleted,
+            "namespace": namespace,
+            "documentId": document_id,
+        }))
     }
 
     async fn clear_namespace(&self, namespace: &str) -> Result<(), MemoryError> {

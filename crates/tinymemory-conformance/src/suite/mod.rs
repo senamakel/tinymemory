@@ -833,7 +833,7 @@ pub async fn assert_documents_round_trip(provider: &dyn MemoryProvider) {
         taint: MemoryTaint::ExternalSync,
     };
 
-    documents
+    let document_id = documents
         .put_document(write("first", "the first body"))
         .await
         .unwrap_or_else(|e| panic!("{who}: put_document failed: {e}"));
@@ -939,6 +939,44 @@ pub async fn assert_documents_round_trip(provider: &dyn MemoryProvider) {
         row.get("namespace").and_then(serde_json::Value::as_str),
         Some(namespace.as_str()),
         "{who}: list_documents returned a row under a different namespace"
+    );
+
+    // The second — and last — untyped payload in the contract. Same reasoning
+    // as the envelope above: `delete_document` answers a `serde_json::Value`,
+    // so the three fields a caller reads are pinned here or nowhere. A host
+    // decoding this got `missing field `namespace`` from the reference driver
+    // and a row from the engine.
+    //
+    // `deleted` is asserted true because the document demonstrably exists at
+    // this point; the "missing document reports an outcome rather than an
+    // error" half of the doc comment is checked by the second call below,
+    // which must not be an `Err`.
+    let removed = documents
+        .delete_document(&namespace, &document_id)
+        .await
+        .unwrap_or_else(|e| panic!("{who}: delete_document failed: {e}"));
+    assert_eq!(
+        removed.get("deleted").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "{who}: delete_document must report `deleted: true` for a document that was there; got {removed}"
+    );
+    for field in ["namespace", "documentId"] {
+        assert!(
+            removed.get(field).is_some(),
+            "{who}: delete_document envelope is missing `{field}`; got {removed}"
+        );
+    }
+    // Deleting what is no longer there is an outcome, not a fault.
+    let again = documents
+        .delete_document(&namespace, &document_id)
+        .await
+        .unwrap_or_else(|e| {
+            panic!("{who}: deleting an absent document must report an outcome, not error: {e}")
+        });
+    assert_eq!(
+        again.get("deleted").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "{who}: the second delete of the same id must report `deleted: false`; got {again}"
     );
 
     documents
