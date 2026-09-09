@@ -12,6 +12,8 @@ pub mod nlp;
 pub mod retrieval;
 pub mod score;
 pub mod summarise;
+#[cfg(test)]
+mod summarise_tests;
 // `module_inception` is a byproduct of the domain-family reorg: the parent was
 // renamed from `memory_tree` to `memory/tree`, which shortened it to match this
 // long-standing inner module. Renaming the inner module would be a real rename
