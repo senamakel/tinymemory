@@ -77,6 +77,7 @@ const LOADER_CASES: &[&str] = &[
     "every_declared_method_is_actually_routed",
     "stateful_optional_families_round_trip_over_the_bus",
     "query_and_maintenance_families_dispatch_typed_requests",
+    "a_source_sync_runs_over_the_bus_and_lands_in_the_store",
 ];
 
 #[test]
@@ -1755,4 +1756,172 @@ async fn bootstrap_connection_finds_its_provider_registry_inside_the_module() {
              init_default_providers. Error was: {rendered}"
         );
     }
+}
+
+/// A source sync runs through the loaded module and its result lands in the store.
+///
+/// `every_declared_method_is_actually_routed` walks the module's declared
+/// method list and checks each one dispatches. Six sync members are in that
+/// list and, before this test, none was ever called: routing is not behaviour,
+/// and the sync pipeline is what a connector-backed install spends its time
+/// doing (#149).
+///
+/// # Why this needs a loaded module at all
+///
+/// The pipeline has ~397 tests across this workspace — `sources/sync_tests.rs`,
+/// `sync/audit_tests.rs`, the `tinymemory-sync` post-processor suites — and
+/// every one runs in-process. What none of them reaches is the same pipeline
+/// **over the bus**, which is a real difference rather than a formality: the
+/// module is a separately compiled `cdylib` with its own statics, so a
+/// task-local set host-side reads as *absent* inside it, and the host's sync
+/// entry points are where scope and credentials cross that boundary.
+///
+/// # Hermetic by construction
+///
+/// A `folder` source over a temp directory holding one file. No network, no
+/// credentials, no fixture beyond `tempfile` — the same approach
+/// `sources/sync_tests.rs` takes for its own folder cases.
+///
+/// # Two things this got wrong first, both worth keeping
+///
+/// The registry is **not** `admit_module`'s `memory_sources` config key: that
+/// key is the serialized registry snapshot operations read, while
+/// `run_source_sync` resolves ids through `get_source_in` against the host's
+/// `config.toml`. Registering in the wrong one is openhuman#5820's "no memory
+/// source registered as src_…" strand, and it is exactly what this test hit.
+///
+/// And `RunSourceSync` does **not** write a sync-audit row. The audit appends
+/// live in `sources::sync::sync_source`, the periodic path; this member goes
+/// through `engine::run_source_pipeline`, which has none. Asserting an audit
+/// row here — the obvious reading of "assert its effect" — would have been
+/// asserting something the member does not do. What it does do is land chunks,
+/// so that is what is checked, through a second bus call.
+#[tokio::test]
+#[ignore = "loads a real module; must be the only test in its process"]
+async fn a_source_sync_runs_over_the_bus_and_lands_in_the_store() {
+    use tinymemory_api::provider::{SourceSyncState, SyncAuditEntry, SyncRunOutcome};
+
+    let workspace = tempfile::tempdir().expect("tempdir");
+
+    let source_dir = workspace.path().join("sync-fixture");
+    std::fs::create_dir_all(&source_dir).expect("create source dir");
+    std::fs::write(
+        source_dir.join("note.md"),
+        "# Sync fixture\n\nA folder source the module can read without a network.\n",
+    )
+    .expect("write fixture file");
+
+    // `admit_module` sends no `config_path`, and the tempdir's parent holds no
+    // `config.toml`, so `provider::host_config_path` falls through to
+    // `workspace_dir/config.toml`. Written before admission, because the module
+    // builds its store during initialization.
+    std::fs::write(
+        workspace.path().join("config.toml"),
+        format!(
+            "[[memory_sources]]\n\
+             id = \"src_sync_fixture\"\n\
+             kind = \"folder\"\n\
+             label = \"Sync fixture\"\n\
+             enabled = true\n\
+             path = \"{}\"\n",
+            source_dir.display()
+        ),
+    )
+    .expect("write source registry");
+
+    let (client, _host, _task) = admit_module(workspace.path()).await;
+    let bus = proxy(&client);
+
+    // ── the run ─────────────────────────────────────────────────────────────
+    let outcome: SyncRunOutcome = bus
+        .call("RunSourceSync", ("src_sync_fixture",))
+        .await
+        .expect("RunSourceSync must reach the pipeline over the bus");
+    assert_eq!(
+        outcome.records_ingested, 1,
+        "the folder holds exactly one file; got {outcome:?}"
+    );
+
+    // ── the effect, read back over the same bus ─────────────────────────────
+    //
+    // The count above is the run's own report. This is the store's, and the two
+    // being separate is the point: a member that returned a plausible
+    // `SyncRunOutcome` without writing anything would satisfy the assertion
+    // above and fail this one.
+    let statuses: Vec<tinymemory_api::provider::SourceIngestStatus> = bus
+        .call(
+            "SourceIngestStatus",
+            (vec![tinymemory_api::provider::SourceIngestQuery {
+                source_id: "src_sync_fixture".to_string(),
+                // The convention the engine's own readers write, trailing
+                // separator included — without it a source keyed `src_a:` also
+                // counts the chunks of `src_ab:`.
+                chunk_id_prefix: "mem_src:src_sync_fixture:".to_string(),
+            }],),
+        )
+        .await
+        .expect("SourceIngestStatus");
+    let status = statuses
+        .iter()
+        .find(|row| row.source_id == "src_sync_fixture")
+        .unwrap_or_else(|| panic!("no ingest status for the synced source; got {statuses:?}"));
+    assert!(
+        status.chunks_synced > 0,
+        "the sync reported {} records but the store holds no chunks under the \
+         source prefix: {status:?}",
+        outcome.records_ingested
+    );
+
+    // ── the second member ───────────────────────────────────────────────────
+    //
+    // `SourceSyncState` is driven and refuses, which is the answer worth
+    // pinning: this engine does not own composio connection state at all —
+    // "reading a composio connection's sync state is synced through the
+    // connector module, not this engine". A refusal that names where the answer
+    // lives is a better contract than a `None` that looks like "no state yet",
+    // and a caller polling for a cursor needs to be able to tell those apart.
+    //
+    // The class matters as much as the refusal. `Invalid` says the request was
+    // wrong; `Unsupported` would say the family is absent, and this driver does
+    // serve `SourceSync` — it just does not serve this member's subject.
+    let state: Result<Option<SourceSyncState>, _> = bus
+        .call("SourceSyncState", ("folder", "src_sync_fixture"))
+        .await;
+    let refusal = state.expect_err("this engine does not own composio connection state");
+    assert!(
+        refusal.wire_name().ends_with("Invalid"),
+        "the refusal must be Invalid — the request is wrong, the family is not \
+         missing — got {refusal:?}"
+    );
+
+    // ── the audit log, and what it does not contain ─────────────────────────
+    //
+    // Reachable over the bus, and empty: `RunSourceSync` goes through
+    // `engine::run_source_pipeline`, which appends no audit row. The rows come
+    // from `sources::sync::sync_source`, the periodic path. Pinned because the
+    // two entry points look interchangeable from the wire and are not — a
+    // caller that ran a manual sync and then read the audit log for it would
+    // wait forever.
+    let audit: Vec<SyncAuditEntry> = bus
+        .call("SyncAuditLog", (Some(16usize),))
+        .await
+        .expect("SyncAuditLog must be reachable");
+    assert!(
+        !audit.iter().any(|row| row.source_id == "src_sync_fixture"),
+        "RunSourceSync is not an audited path; if it has become one, this test \
+         should assert the row rather than its absence. Got: {audit:?}"
+    );
+
+    // ── the NotFound contract ───────────────────────────────────────────────
+    //
+    // Documented as "deliberately distinct from a sync that ran and found
+    // nothing, because a caller retrying a deleted source should learn that
+    // rather than see an empty success". Nothing checked it.
+    let missing: Result<SyncRunOutcome, _> =
+        bus.call("RunSourceSync", ("src_does_not_exist",)).await;
+    let error = missing.expect_err("an unregistered source id must not be an empty success");
+    assert!(
+        error.wire_name().ends_with("NotFound"),
+        "an unregistered id must refuse as NotFound, got {error:?}"
+    );
 }
