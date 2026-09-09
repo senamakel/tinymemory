@@ -831,6 +831,68 @@ pub async fn assert_documents_round_trip(provider: &dyn MemoryProvider) {
         "{who}: a second write under the same key did not replace the first"
     );
 
+    // `list_documents` answers an untyped `serde_json::Value`, so nothing in the
+    // type system makes two drivers agree on what is inside it. That is not
+    // hypothetical: the reference driver returned `{"documents": [{"document_id":
+    // …}]}` — snake_case, no `count` — against the engine's `{"count": N,
+    // "documents": [{"documentId": …}]}`, and both passed every assertion this
+    // suite made, because this suite made none. A host decoding the envelope got
+    // `missing field \`documentId\`` from one driver and rows from the other.
+    //
+    // So the envelope is pinned here, at the level the contract actually
+    // promises: the two envelope fields, `count` agreeing with the array, and
+    // the per-row keys a caller reads. Row *order* is deliberately not asserted
+    // — the engine orders by `updated_at DESC` and two writes can land in the
+    // same tick, so an order assertion would be a flake rather than a contract.
+    let listed = documents
+        .list_documents(Some(&namespace))
+        .await
+        .unwrap_or_else(|e| panic!("{who}: list_documents failed: {e}"));
+    let rows = listed
+        .get("documents")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("{who}: list_documents must answer an object with a `documents` array; got {listed}")
+        });
+    assert_eq!(
+        rows.len(),
+        1,
+        "{who}: list_documents of a namespace holding one document returned {} rows",
+        rows.len()
+    );
+    assert_eq!(
+        listed.get("count").and_then(serde_json::Value::as_u64),
+        Some(rows.len() as u64),
+        "{who}: list_documents `count` must equal the length of `documents`; got {listed}"
+    );
+    let row = &rows[0];
+    for field in [
+        "documentId",
+        "namespace",
+        "key",
+        "title",
+        "sourceType",
+        "priority",
+        "createdAt",
+        "updatedAt",
+        "taint",
+    ] {
+        assert!(
+            row.get(field).is_some(),
+            "{who}: list_documents row is missing `{field}`; got {row}"
+        );
+    }
+    assert_eq!(
+        row.get("key").and_then(serde_json::Value::as_str),
+        Some(key),
+        "{who}: list_documents returned a row for a different key"
+    );
+    assert_eq!(
+        row.get("namespace").and_then(serde_json::Value::as_str),
+        Some(namespace.as_str()),
+        "{who}: list_documents returned a row under a different namespace"
+    );
+
     documents
         .clear_namespace(&namespace)
         .await

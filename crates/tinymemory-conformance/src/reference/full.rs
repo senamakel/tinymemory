@@ -523,6 +523,7 @@ impl MemoryDocuments for RecordingProvider {
             scoped: None,
         });
         let document_id = input.document_id.clone().unwrap_or_else(|| "doc".into());
+        let now = tinymemory_api::chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
         let stored = StoredMemoryDocument {
             document_id: document_id.clone(),
             namespace: input.namespace.clone(),
@@ -535,8 +536,8 @@ impl MemoryDocuments for RecordingProvider {
             metadata: input.metadata,
             category: input.category,
             session_id: input.session_id,
-            created_at: 0.0,
-            updated_at: 0.0,
+            created_at: now,
+            updated_at: now,
             markdown_rel_path: String::new(),
             taint: input.taint,
         };
@@ -557,32 +558,40 @@ impl MemoryDocuments for RecordingProvider {
 
     async fn list_documents(
         &self,
-        _namespace: Option<&str>,
+        namespace: Option<&str>,
     ) -> Result<serde_json::Value, MemoryError> {
         self.record(Call::plain("documents.list_documents"));
         let docs = lock(&self.documents);
         let mut rows: Vec<&StoredMemoryDocument> = docs
-            .iter()
-            .filter(|((ns, _), _)| _namespace.is_none_or(|want| ns == want))
-            .map(|(_, doc)| doc)
+            .values()
+            .filter(|doc| namespace.is_none_or(|want| doc.namespace == want))
             .collect();
-        rows.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(serde_json::json!({
-            "documents": rows
-                .into_iter()
-                .map(|d| serde_json::json!({
-                    "document_id": d.document_id,
+        // Newest first, as the engine's `ORDER BY updated_at DESC` gives. Ties
+        // break on the key so the order is total rather than merely stable,
+        // because two documents written in the same millisecond otherwise come
+        // back in `HashMap` order — reproducible for a run and not between them.
+        rows.sort_by(|a, b| {
+            b.updated_at
+                .total_cmp(&a.updated_at)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        let documents: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|d| {
+                serde_json::json!({
+                    "documentId": d.document_id,
                     "namespace": d.namespace,
                     "key": d.key,
                     "title": d.title,
-                    "content": d.content,
-                    "source_type": d.source_type,
+                    "sourceType": d.source_type,
                     "priority": d.priority,
-                    "tags": d.tags,
-                    "category": d.category,
-                }))
-                .collect::<Vec<_>>()
-        }))
+                    "createdAt": d.created_at,
+                    "updatedAt": d.updated_at,
+                    "taint": d.taint,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "count": documents.len(), "documents": documents }))
     }
 
     async fn list_namespaces(&self) -> Result<Vec<String>, MemoryError> {
