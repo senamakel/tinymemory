@@ -3,7 +3,9 @@
 use serde_json::json;
 use tinymemory_api::error::MemoryError;
 
-use super::{cortex_role, ingest_count, layer_limits, observed_at, receipt};
+use super::operations::{
+    answer_text, cortex_role, ingest_count, layer_limits, observed_at, receipt,
+};
 
 #[test]
 fn receipt_requires_an_event_id_and_boolean_replay_flag() {
@@ -64,4 +66,15 @@ fn ingest_counts_fail_instead_of_saturating() {
     if usize::BITS > u32::BITS {
         assert!(ingest_count(u32::MAX as usize + 1).is_err());
     }
+}
+
+#[test]
+fn answer_text_rejects_missing_or_non_string_success_payloads() {
+    assert!(answer_text(&json!({})).is_err());
+    assert!(answer_text(&json!({"answer": null})).is_err());
+    assert!(answer_text(&json!({"answer": 7})).is_err());
+    assert_eq!(
+        answer_text(&json!({"answer": "grounded"})).ok(),
+        Some("grounded")
+    );
 }

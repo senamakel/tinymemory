@@ -1,4 +1,4 @@
-//! Capability-accurate CortexDB provider composition.
+//! CortexDB provider construction and capability implementations.
 
 use std::sync::Arc;
 
@@ -27,24 +27,12 @@ use tinymemory_api::types::{
 use crate::common::{encode, Attempts, HttpClient};
 use crate::cortex::{CortexDialect, CortexMemory, CORTEX_DRIVER_ID};
 
+use super::types::ExperienceInput;
+
 /// CortexDB exposed as mandatory storage plus native ingestion and answers.
 pub struct CortexProvider {
     mandatory: MemoryTraitProvider,
     client: HttpClient,
-}
-
-struct ExperienceInput<'a> {
-    namespace: &'a str,
-    modality: &'a str,
-    role: Option<&'a str>,
-    key: &'a str,
-    body: &'a str,
-    session_id: Option<&'a str>,
-    taint: MemoryTaint,
-    payload: Value,
-    idempotency_seed: &'a str,
-    observed_at: Option<String>,
-    labels: Vec<String>,
 }
 
 impl std::fmt::Debug for CortexProvider {
@@ -144,7 +132,7 @@ impl CortexProvider {
     }
 }
 
-fn receipt(answer: &Value) -> Result<(String, bool), MemoryError> {
+pub(super) fn receipt(answer: &Value) -> Result<(String, bool), MemoryError> {
     let id = answer
         .get("event_id")
         .and_then(Value::as_str)
@@ -165,7 +153,7 @@ fn idempotency_key(seed: &str) -> String {
     encode(digest.finalize())
 }
 
-fn cortex_role(role: &str) -> &'static str {
+pub(super) fn cortex_role(role: &str) -> &'static str {
     // Cortex's role is a four-value message class, while IngestItem::author is
     // deliberately open and often contains a person's name. Known agent roles
     // retain their class; every other speaker is a human/user. The exact author
@@ -197,7 +185,7 @@ fn category_for(modality: &str) -> MemoryCategory {
     }
 }
 
-fn layer_limits(limit: usize) -> Value {
+pub(super) fn layer_limits(limit: usize) -> Value {
     const LAYERS: [&str; 5] = ["events", "facts", "beliefs", "episodes", "understanding"];
     let base = limit / LAYERS.len();
     let remainder = limit % LAYERS.len();
@@ -211,7 +199,7 @@ fn layer_limits(limit: usize) -> Value {
     Value::Object(limits)
 }
 
-fn observed_at(timestamp: f64) -> Result<String, MemoryError> {
+pub(super) fn observed_at(timestamp: f64) -> Result<String, MemoryError> {
     if !timestamp.is_finite() {
         return Err(MemoryError::Invalid(
             "learning observed_at must be a finite Unix timestamp".to_string(),
@@ -415,7 +403,10 @@ impl MemoryConversationIngest for CortexProvider {
         }
         let receipts = results.iter().map(receipt).collect::<Result<Vec<_>, _>>()?;
         let written = ingest_count(receipts.iter().filter(|(_, replayed)| !replayed).count())?;
-        let ids = receipts.into_iter().map(|(id, _)| id).collect();
+        let ids = receipts
+            .into_iter()
+            .filter_map(|(id, replayed)| (!replayed).then_some(id))
+            .collect();
         Ok(IngestOutcome {
             written,
             ids,
@@ -577,12 +568,9 @@ impl MemoryAnswer for CortexProvider {
             .enumerate()
             .map(|(index, citation)| citation_of(citation, namespace, index, fallback_context))
             .collect();
+        let answer = answer_text(&response)?;
         Ok(AnswerResponse {
-            answer: response
-                .get("answer")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            answer: answer.to_string(),
             citations,
             steps: vec![AnswerStep {
                 operation: "cortexdb_answer".to_string(),
@@ -635,17 +623,24 @@ fn citation_of(
     }
 }
 
+pub(super) fn answer_text(response: &Value) -> Result<&str, MemoryError> {
+    response
+        .get("answer")
+        .and_then(Value::as_str)
+        .ok_or_else(|| MemoryError::Backend("CortexDB omitted string answer".to_string()))
+}
+
 fn single_outcome((id, replayed): (String, bool)) -> IngestOutcome {
     IngestOutcome {
         written: u32::from(!replayed),
-        ids: vec![id],
+        ids: (!replayed).then_some(id).into_iter().collect(),
         already_ingested: replayed,
         extract_jobs_enqueued: u32::from(!replayed),
         ..IngestOutcome::default()
     }
 }
 
-fn ingest_count(count: usize) -> Result<u32, MemoryError> {
+pub(super) fn ingest_count(count: usize) -> Result<u32, MemoryError> {
     u32::try_from(count).map_err(|_| {
         MemoryError::Backend(format!(
             "CortexDB returned {count} results, exceeding TinyMemory's u32 ingest count"
@@ -692,7 +687,3 @@ impl MemoryProvider for CortexProvider {
         Some(self)
     }
 }
-
-#[cfg(test)]
-#[path = "cortex_provider_test.rs"]
-mod test;

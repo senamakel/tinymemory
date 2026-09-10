@@ -205,7 +205,9 @@ impl CortexMemory {
             let url =
                 reqwest::Url::parse(endpoint).context("cortex endpoint is not a valid URL")?;
             if url.scheme() == "http" {
-                let host = url.host_str().unwrap_or_default();
+                let host = url
+                    .host_str()
+                    .ok_or_else(|| anyhow::anyhow!("credentialed CortexDB endpoint has no host"))?;
                 let ip_host = host.trim_start_matches('[').trim_end_matches(']');
                 let loopback = host.eq_ignore_ascii_case("localhost")
                     || ip_host

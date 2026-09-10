@@ -1131,6 +1131,7 @@ async fn cortex_full_provider_ingests_every_product_shape() {
         .expect("idempotent replay");
     assert_eq!(replay.written, 0);
     assert!(replay.already_ingested);
+    assert!(replay.ids.is_empty());
 
     for (namespace, query) in [
         (document_namespace, "launch architecture"),
