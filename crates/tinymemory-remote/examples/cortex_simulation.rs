@@ -37,12 +37,30 @@ fn item(namespace: &str, source_id: &str, content: &str, author: Option<&str>) -
     }
 }
 
+fn valid_simulation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let endpoint = args.next().ok_or_else(usage)?;
     let key = args.next().ok_or_else(usage)?;
     anyhow::ensure!(args.next().is_none(), "{}", usage());
+
+    let suffix = std::env::var("TINYMEMORY_CORTEX_SIMULATION_ID").unwrap_or_else(|_| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos().to_string())
+            .unwrap_or_else(|_| "clock-error".to_string())
+    });
+    anyhow::ensure!(
+        valid_simulation_id(&suffix),
+        "TINYMEMORY_CORTEX_SIMULATION_ID must contain only ASCII letters, digits, '_' or '-'"
+    );
 
     let provider = cortex_provider(CortexMemory::api(&endpoint, &key)?);
     tinymemory_api::provider::audit_provider(&provider)?;
@@ -51,12 +69,6 @@ async fn main() -> anyhow::Result<()> {
         "CortexDB is not usable"
     );
 
-    let suffix = std::env::var("TINYMEMORY_CORTEX_SIMULATION_ID").unwrap_or_else(|_| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos().to_string())
-            .unwrap_or_else(|_| "clock-error".to_string())
-    });
     let document_namespace = format!("simulation/{suffix}/documents");
     let conversation_namespace = format!("simulation/{suffix}/conversation");
     let event_namespace = format!("simulation/{suffix}/events");
