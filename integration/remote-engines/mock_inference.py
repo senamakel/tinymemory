@@ -83,7 +83,11 @@ class Handler(BaseHTTPRequestHandler):
             content = (
                 json.dumps(schema_value(schema))
                 if schema
-                else "The simulated answer is grounded in the recalled CortexDB evidence."
+                else (
+                    json.dumps({})
+                    if response_format.get("type") == "json_object"
+                    else "The simulated answer is grounded in the recalled CortexDB evidence."
+                )
             )
             self.send_json(
                 200,
