@@ -43,6 +43,7 @@ cleanup() {
 trap cleanup EXIT
 
 simulation_id="ladder-$(date +%s)-$$"
+cortex_key="${TINYMEMORY_TEST_CORTEX_KEY:-tinymemory-cortex-test}"
 export TINYMEMORY_CORTEX_SIMULATION_ID="$simulation_id"
 
 docker compose --project-name tinymemory-cortex-ladder \
@@ -67,11 +68,11 @@ for _ in $(seq 1 120); do
     fi
 
     cargo run -p tinymemory-remote --example cortex_simulation -- \
-      http://127.0.0.1:3141 tinymemory-cortex-test
+      http://127.0.0.1:3141 "$cortex_key"
 
     before="$(
       curl --fail --silent \
-        -H 'Authorization: Bearer tinymemory-cortex-test' \
+        -H "Authorization: Bearer $cortex_key" \
         'http://127.0.0.1:3141/v1/scopes/list?limit=10000' \
         | jq '.items | length'
     )"
@@ -82,7 +83,7 @@ for _ in $(seq 1 120); do
       if curl --fail --silent http://127.0.0.1:3141/v1/admin/ready >/dev/null; then
         after="$(
           curl --fail --silent \
-            -H 'Authorization: Bearer tinymemory-cortex-test' \
+            -H "Authorization: Bearer $cortex_key" \
             'http://127.0.0.1:3141/v1/scopes/list?limit=10000' \
             | jq '.items | length'
         )"
@@ -94,7 +95,7 @@ for _ in $(seq 1 120); do
           --arg scope "tm:simulation/tm:$simulation_id/tm:conversation" \
           '{scope: $scope, query: "Project Aurora launches on Thursday."}' \
           | curl --fail --silent \
-              -H 'Authorization: Bearer tinymemory-cortex-test' \
+              -H "Authorization: Bearer $cortex_key" \
               -H 'Content-Type: application/json' \
               --data-binary @- \
               http://127.0.0.1:3141/v1/recall \

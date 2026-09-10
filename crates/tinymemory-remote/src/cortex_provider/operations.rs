@@ -153,6 +153,10 @@ fn idempotency_key(seed: &str) -> String {
     encode(digest.finalize())
 }
 
+pub(super) fn event_identity(namespace: &str, id: &str) -> String {
+    format!("{}:{namespace}{}:{id}", namespace.len(), id.len())
+}
+
 pub(super) fn cortex_role(role: &str) -> &'static str {
     // Cortex's role is a four-value message class, while IngestItem::author is
     // deliberately open and often contains a person's name. Known agent roles
@@ -476,7 +480,7 @@ impl MemoryEventIngest for CortexProvider {
         }
         let payload = serde_json::to_value(&event)?;
         let key = format!("event:{}", event.id);
-        let seed = format!("{}:{}", event.namespace, event.id);
+        let seed = event_identity(&event.namespace, &event.id);
         let receipt = self
             .experience(ExperienceInput {
                 namespace: &event.namespace,

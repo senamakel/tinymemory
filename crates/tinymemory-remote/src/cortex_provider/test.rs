@@ -4,7 +4,7 @@ use serde_json::json;
 use tinymemory_api::error::MemoryError;
 
 use super::operations::{
-    answer_text, cortex_role, ingest_count, layer_limits, observed_at, receipt,
+    answer_text, cortex_role, event_identity, ingest_count, layer_limits, observed_at, receipt,
 };
 
 #[test]
@@ -77,4 +77,9 @@ fn answer_text_rejects_missing_or_non_string_success_payloads() {
         answer_text(&json!({"answer": "grounded"})).ok(),
         Some("grounded")
     );
+}
+
+#[test]
+fn event_identity_cannot_collide_across_namespace_and_id_boundaries() {
+    assert_ne!(event_identity("a:b", "c"), event_identity("a", "b:c"));
 }
