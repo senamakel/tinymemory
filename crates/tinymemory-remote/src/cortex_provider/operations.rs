@@ -552,7 +552,7 @@ impl MemoryAnswer for CortexProvider {
                     "cite_sources": true,
                     "include_context": true,
                 })),
-                Attempts::RetryTransient,
+                Attempts::Once,
             )
             .await
             .map_err(engine_error)?;
