@@ -414,8 +414,7 @@ impl MemoryConversationIngest for CortexProvider {
             )));
         }
         let receipts = results.iter().map(receipt).collect::<Result<Vec<_>, _>>()?;
-        let written = u32::try_from(receipts.iter().filter(|(_, replayed)| !replayed).count())
-            .unwrap_or(u32::MAX);
+        let written = ingest_count(receipts.iter().filter(|(_, replayed)| !replayed).count())?;
         let ids = receipts.into_iter().map(|(id, _)| id).collect();
         Ok(IngestOutcome {
             written,
@@ -644,6 +643,14 @@ fn single_outcome((id, replayed): (String, bool)) -> IngestOutcome {
         extract_jobs_enqueued: u32::from(!replayed),
         ..IngestOutcome::default()
     }
+}
+
+fn ingest_count(count: usize) -> Result<u32, MemoryError> {
+    u32::try_from(count).map_err(|_| {
+        MemoryError::Backend(format!(
+            "CortexDB returned {count} results, exceeding TinyMemory's u32 ingest count"
+        ))
+    })
 }
 
 #[async_trait]

@@ -3,7 +3,7 @@
 use serde_json::json;
 use tinymemory_api::error::MemoryError;
 
-use super::{cortex_role, layer_limits, observed_at, receipt};
+use super::{cortex_role, ingest_count, layer_limits, observed_at, receipt};
 
 #[test]
 fn receipt_requires_an_event_id_and_boolean_replay_flag() {
@@ -56,4 +56,12 @@ fn named_human_speakers_keep_the_user_message_class() {
     assert_eq!(cortex_role("assistant"), "assistant");
     assert_eq!(cortex_role("tool"), "tool");
     assert_eq!(cortex_role("system"), "system");
+}
+
+#[test]
+fn ingest_counts_fail_instead_of_saturating() {
+    assert_eq!(ingest_count(12).ok(), Some(12));
+    if usize::BITS > u32::BITS {
+        assert!(ingest_count(u32::MAX as usize + 1).is_err());
+    }
 }
