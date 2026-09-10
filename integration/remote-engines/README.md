@@ -72,6 +72,12 @@ script points the same image and configuration at the host's `vectors`,
 `flash`, `reasoning`, and `max-reasoning` ladders. Cohere reranking and binary
 media processors are intentionally outside this profile.
 
+The live script fixes the inference destination to `host.docker.internal:6969`;
+it cannot be redirected to a remote plaintext host. The Ladder bearer crosses
+only the host-local Docker bridge and is never printed or persisted in the
+repository. CortexDB's own reusable bearer is separately restricted to HTTPS,
+with literal loopback HTTP allowed for this harness.
+
 Stop the harness without deleting its named volumes:
 
 ```sh

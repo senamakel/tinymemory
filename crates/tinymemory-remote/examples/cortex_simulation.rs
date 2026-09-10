@@ -51,9 +51,12 @@ async fn main() -> anyhow::Result<()> {
         "CortexDB is not usable"
     );
 
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
+    let suffix = std::env::var("TINYMEMORY_CORTEX_SIMULATION_ID").unwrap_or_else(|_| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos().to_string())
+            .unwrap_or_else(|_| "clock-error".to_string())
+    });
     let document_namespace = format!("simulation/{suffix}/documents");
     let conversation_namespace = format!("simulation/{suffix}/conversation");
     let event_namespace = format!("simulation/{suffix}/events");

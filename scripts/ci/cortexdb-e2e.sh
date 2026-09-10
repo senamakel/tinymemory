@@ -17,6 +17,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+simulation_id="ci-$(date +%s)-$$"
+export TINYMEMORY_CORTEX_SIMULATION_ID="$simulation_id"
+
 docker compose --project-name tinymemory-cortex-ci \
   -f integration/remote-engines/docker-compose.yml \
   --profile cortex up -d cortex mock-inference
@@ -62,6 +65,16 @@ for _ in $(seq 1 120); do
           echo "CortexDB did not preserve simulation scopes across restart" >&2
           exit 1
         fi
+        jq -n \
+          --arg scope "tm:simulation/tm:$simulation_id/tm:conversation" \
+          '{scope: $scope, query: "Project Aurora launches on Thursday."}' \
+          | curl --fail --silent \
+              -H 'Authorization: Bearer tinymemory-cortex-test' \
+              -H 'Content-Type: application/json' \
+              --data-binary @- \
+              http://127.0.0.1:3141/v1/recall \
+          | jq -e '.layers.events | map(.content.text // "") | any(contains("Project Aurora launches on Thursday."))' \
+          >/dev/null
         exit 0
       fi
       sleep 1
