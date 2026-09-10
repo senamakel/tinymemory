@@ -88,7 +88,7 @@ use tinymemory_api::types::{MemoryCategory, MemoryTaint};
 use crate::common::{Attempts, Dialect, HttpClient, RemoteMemory, StoredEntry};
 
 /// Stable driver id used by configuration and status output.
-pub const CORTEX_DRIVER_ID: &str = "cortex";
+pub use tinymemory_api::drivers::CORTEX_DRIVER_ID;
 
 /// Default base URL for CortexDB's managed API.
 pub const CORTEX_API_ENDPOINT: &str = "https://api-v1.cortexdb.ai";
@@ -173,12 +173,16 @@ const MAX_PAGES: usize = 500;
 const SCOPE_LIST_LIMIT: usize = 10_000;
 
 /// CortexDB, adapted to TinyMemory's keyed contract.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CortexMemory {
     inner: RemoteMemory<CortexDialect>,
 }
 
 impl CortexMemory {
+    pub(crate) fn operation_client(&self) -> HttpClient {
+        self.inner.dialect().client.clone()
+    }
+
     /// Rebuilds the HTTP transport with a different per-request deadline.
     ///
     /// # Errors
@@ -266,6 +270,9 @@ struct Envelope {
     /// are still on disk. See [`Dialect::delete`] for why we write one.
     #[serde(default)]
     d: bool,
+    /// Original product-facing payload for granular ingestion operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    x: Option<Value>,
 }
 
 /// One event as the fold needs to see it.
@@ -275,8 +282,8 @@ struct Folded {
     entry: Option<StoredEntry>,
 }
 
-#[derive(Debug)]
-struct CortexDialect {
+#[derive(Clone, Debug)]
+pub(crate) struct CortexDialect {
     client: HttpClient,
 }
 
@@ -293,7 +300,7 @@ impl CortexDialect {
     /// record against the namespace it asked for and drops mismatches, so a
     /// scope this adapter cannot map *back* yields zero hits silently — a worse
     /// failure than a rejection, because nothing reports it.
-    fn scope_of(namespace: &str) -> anyhow::Result<String> {
+    pub(crate) fn scope_of(namespace: &str) -> anyhow::Result<String> {
         let mut out = Vec::new();
         for segment in namespace.split('/').filter(|s| !s.is_empty()) {
             let safe = segment
@@ -751,6 +758,7 @@ impl Dialect for CortexDialect {
                 .to_string(),
             ),
             d: false,
+            x: None,
         })?;
         let accepted: Value = self
             .client
@@ -843,6 +851,7 @@ impl Dialect for CortexDialect {
             s: None,
             t: None,
             d: true,
+            x: None,
         })?;
         let accepted: Value = self
             .client
