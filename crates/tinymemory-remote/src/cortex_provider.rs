@@ -31,6 +31,20 @@ pub struct CortexProvider {
     client: HttpClient,
 }
 
+struct ExperienceInput<'a> {
+    namespace: &'a str,
+    modality: &'a str,
+    role: Option<&'a str>,
+    key: &'a str,
+    body: &'a str,
+    session_id: Option<&'a str>,
+    taint: MemoryTaint,
+    payload: Value,
+    idempotency_seed: &'a str,
+    observed_at: Option<String>,
+    labels: Vec<String>,
+}
+
 impl std::fmt::Debug for CortexProvider {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -50,37 +64,8 @@ impl CortexProvider {
         }
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the arguments are Cortex experience fields"
-    )]
-    async fn experience(
-        &self,
-        namespace: &str,
-        modality: &str,
-        role: Option<&str>,
-        key: &str,
-        body: &str,
-        session_id: Option<&str>,
-        taint: MemoryTaint,
-        payload: Value,
-        idempotency_seed: &str,
-        observed_at: Option<String>,
-        labels: Vec<String>,
-    ) -> Result<(String, bool), MemoryError> {
-        let request = Self::experience_request(
-            namespace,
-            modality,
-            role,
-            key,
-            body,
-            session_id,
-            taint,
-            payload,
-            idempotency_seed,
-            observed_at,
-            labels,
-        )?;
+    async fn experience(&self, input: ExperienceInput<'_>) -> Result<(String, bool), MemoryError> {
+        let request = Self::experience_request(input)?;
         let answer: Value = self
             .client
             .json(
@@ -94,23 +79,20 @@ impl CortexProvider {
         receipt(&answer)
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the arguments are Cortex experience fields"
-    )]
-    fn experience_request(
-        namespace: &str,
-        modality: &str,
-        role: Option<&str>,
-        key: &str,
-        body: &str,
-        session_id: Option<&str>,
-        taint: MemoryTaint,
-        payload: Value,
-        idempotency_seed: &str,
-        observed_at: Option<String>,
-        labels: Vec<String>,
-    ) -> Result<Value, MemoryError> {
+    fn experience_request(input: ExperienceInput<'_>) -> Result<Value, MemoryError> {
+        let ExperienceInput {
+            namespace,
+            modality,
+            role,
+            key,
+            body,
+            session_id,
+            taint,
+            payload,
+            idempotency_seed,
+            observed_at,
+            labels,
+        } = input;
         if namespace.trim().is_empty()
             || modality.trim().is_empty()
             || key.trim().is_empty()
@@ -294,19 +276,19 @@ impl MemoryDocumentIngest for CortexProvider {
         let payload = serde_json::to_value(&document)?;
         let seed = serde_json::to_string(&payload)?;
         let receipt = self
-            .experience(
-                &namespace,
-                "document",
-                None,
-                &key,
-                &document.content,
-                None,
-                document.taint,
+            .experience(ExperienceInput {
+                namespace: &namespace,
+                modality: "document",
+                role: None,
+                key: &key,
+                body: &document.content,
+                session_id: None,
+                taint: document.taint,
                 payload,
-                &seed,
-                document.timestamp.map(|stamp| stamp.to_rfc3339()),
-                document.tags,
-            )
+                idempotency_seed: &seed,
+                observed_at: document.timestamp.map(|stamp| stamp.to_rfc3339()),
+                labels: document.tags,
+            })
             .await?;
         Ok(single_outcome(receipt))
     }
@@ -346,25 +328,26 @@ impl MemoryConversationIngest for CortexProvider {
         let message_count = messages.len();
         let mut items = Vec::with_capacity(message_count);
         for (index, message) in messages.into_iter().enumerate() {
-            let role = message.author.as_deref().unwrap_or("user");
+            let role = message.author.clone().unwrap_or_else(|| "user".to_string());
             let payload = serde_json::to_value(&message)?;
             let seed = format!(
                 "{conversation_id}:{index}:{}",
                 serde_json::to_string(&payload)?
             );
-            items.push(Self::experience_request(
-                &namespace,
-                "conversation",
-                Some(role),
-                &format!("message:{conversation_id}:{index}"),
-                &message.content,
-                Some(&conversation_id),
-                message.taint,
+            let key = format!("message:{conversation_id}:{index}");
+            items.push(Self::experience_request(ExperienceInput {
+                namespace: &namespace,
+                modality: "conversation",
+                role: Some(&role),
+                key: &key,
+                body: &message.content,
+                session_id: Some(&conversation_id),
+                taint: message.taint,
                 payload,
-                &seed,
-                message.timestamp.map(|stamp| stamp.to_rfc3339()),
-                message.tags,
-            )?);
+                idempotency_seed: &seed,
+                observed_at: message.timestamp.map(|stamp| stamp.to_rfc3339()),
+                labels: message.tags,
+            })?);
         }
         let response: Value = self
             .client
@@ -424,20 +407,22 @@ impl MemoryLearningIngest for CortexProvider {
         let namespace = format!("learning:{class}");
         let payload = serde_json::to_value(&learning)?;
         let seed = serde_json::to_string(&payload)?;
+        let key = format!("learning:{}", learning.key);
+        let body = format!("{}: {}", learning.key, learning.value);
         let receipt = self
-            .experience(
-                &namespace,
-                "observation",
-                None,
-                &format!("learning:{}", learning.key),
-                &format!("{}: {}", learning.key, learning.value),
-                None,
-                MemoryTaint::Internal,
+            .experience(ExperienceInput {
+                namespace: &namespace,
+                modality: "observation",
+                role: None,
+                key: &key,
+                body: &body,
+                session_id: None,
+                taint: MemoryTaint::Internal,
                 payload,
-                &seed,
-                None,
-                vec!["tinymemory-learning".to_string(), class],
-            )
+                idempotency_seed: &seed,
+                observed_at: None,
+                labels: vec!["tinymemory-learning".to_string(), class],
+            })
             .await?;
         Ok(single_outcome(receipt))
     }
@@ -456,20 +441,22 @@ impl MemoryEventIngest for CortexProvider {
             ));
         }
         let payload = serde_json::to_value(&event)?;
+        let key = format!("event:{}", event.id);
+        let seed = format!("{}:{}", event.namespace, event.id);
         let receipt = self
-            .experience(
-                &event.namespace,
-                &event.event_type,
-                None,
-                &format!("event:{}", event.id),
-                &event.content,
-                event.session_id.as_deref(),
-                event.taint,
+            .experience(ExperienceInput {
+                namespace: &event.namespace,
+                modality: &event.event_type,
+                role: None,
+                key: &key,
+                body: &event.content,
+                session_id: event.session_id.as_deref(),
+                taint: event.taint,
                 payload,
-                &format!("{}:{}", event.namespace, event.id),
-                event.occurred_at.map(|stamp| stamp.to_rfc3339()),
-                vec![format!("tinymemory-event:{}", event.event_type)],
-            )
+                idempotency_seed: &seed,
+                observed_at: event.occurred_at.map(|stamp| stamp.to_rfc3339()),
+                labels: vec![format!("tinymemory-event:{}", event.event_type)],
+            })
             .await?;
         Ok(single_outcome(receipt))
     }
