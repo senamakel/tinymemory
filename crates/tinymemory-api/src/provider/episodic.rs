@@ -179,9 +179,10 @@ pub trait MemoryEpisodic: Send + Sync {
     ///
     /// The recovery half of the recap contract (oh#6186). When a summariser
     /// fails, the caller is expected to write **nothing** — the driver does not
-    /// substitute a fallback (see [`MemoryTree::summarise`]), and a caller that
-    /// persisted one would flip the segment to summarised and lose the fact
-    /// that it never was. That leaves the segment closed with no summary, which
+    /// substitute a fallback (see
+    /// [`MemoryTree::summarise`](super::content::MemoryTree::summarise)), and a
+    /// caller that persisted one would flip the segment to summarised and lose
+    /// the fact that it never was. That leaves the segment closed with no summary, which
     /// is the marker this selects on: no schema addition, and no state a driver
     /// has to start recording.
     ///
