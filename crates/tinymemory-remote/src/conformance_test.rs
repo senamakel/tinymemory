@@ -665,7 +665,11 @@ async fn cortex_experience(
     // becoming readable before it reports the write as done.
     (
         axum::http::StatusCode::ACCEPTED,
-        Json(json!({ "event_id": id, "status": "captured" })),
+        Json(json!({
+            "event_id": id,
+            "status": "captured",
+            "replayed_from_idempotency": false
+        })),
     )
 }
 

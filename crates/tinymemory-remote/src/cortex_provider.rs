@@ -148,13 +148,13 @@ fn receipt(answer: &Value) -> Result<(String, bool), MemoryError> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| MemoryError::Backend("CortexDB omitted event_id".to_string()))?;
-    Ok((
-        id,
-        answer
-            .get("replayed_from_idempotency")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    ))
+    let replayed = answer
+        .get("replayed_from_idempotency")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            MemoryError::Backend("CortexDB omitted boolean replayed_from_idempotency".to_string())
+        })?;
+    Ok((id, replayed))
 }
 
 fn idempotency_key(seed: &str) -> String {
@@ -639,3 +639,7 @@ impl MemoryProvider for CortexProvider {
         Some(self)
     }
 }
+
+#[cfg(test)]
+#[path = "cortex_provider_test.rs"]
+mod test;
