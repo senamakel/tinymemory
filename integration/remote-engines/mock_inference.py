@@ -80,7 +80,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.endswith("/chat/completions"):
             response_format = request.get("response_format", {})
             schema = response_format.get("json_schema", {}).get("schema", {})
-            content = json.dumps(schema_value(schema) if schema else {})
+            content = (
+                json.dumps(schema_value(schema))
+                if schema
+                else "The simulated answer is grounded in the recalled CortexDB evidence."
+            )
             self.send_json(
                 200,
                 {

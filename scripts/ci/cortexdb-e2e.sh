@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Exercise every CortexDB ingestion route against the pinned real server.
+
+set -euo pipefail
+
+cleanup() {
+  result=$?
+  if [ "$result" -ne 0 ]; then
+    docker compose --project-name tinymemory-cortex-ci \
+      -f integration/remote-engines/docker-compose.yml \
+      --profile cortex logs cortex mock-inference || true
+  fi
+  docker compose --project-name tinymemory-cortex-ci \
+    -f integration/remote-engines/docker-compose.yml \
+    --profile cortex down --volumes --remove-orphans || true
+  exit "$result"
+}
+trap cleanup EXIT
+
+docker compose --project-name tinymemory-cortex-ci \
+  -f integration/remote-engines/docker-compose.yml \
+  --profile cortex up -d cortex mock-inference
+
+for _ in $(seq 1 120); do
+  if curl --fail --silent http://127.0.0.1:3141/v1/admin/ready >/dev/null; then
+    logs="$(
+      docker compose --project-name tinymemory-cortex-ci \
+        -f integration/remote-engines/docker-compose.yml \
+        --profile cortex logs cortex
+    )"
+    if printf '%s\n' "$logs" \
+      | grep -Eq 'failed to load cortex.toml|enrichment OFF|auto-layer scheduler OFF'; then
+      echo "CortexDB started with a disabled or rejected full-memory configuration" >&2
+      exit 1
+    fi
+    if ! printf '%s\n' "$logs" | grep -q 'provider.*openai-http:vectors:3072'; then
+      echo "CortexDB did not pin the configured 3072-dimensional vectors ladder" >&2
+      exit 1
+    fi
+
+    cargo run -p tinymemory-remote --example cortex_simulation -- \
+      http://127.0.0.1:3141 tinymemory-cortex-test
+
+    before="$(
+      curl --fail --silent \
+        -H 'Authorization: Bearer tinymemory-cortex-test' \
+        'http://127.0.0.1:3141/v1/scopes/list?limit=10000' \
+        | jq '.items | length'
+    )"
+    docker compose --project-name tinymemory-cortex-ci \
+      -f integration/remote-engines/docker-compose.yml \
+      --profile cortex restart cortex >/dev/null
+    for _ in $(seq 1 120); do
+      if curl --fail --silent http://127.0.0.1:3141/v1/admin/ready >/dev/null; then
+        after="$(
+          curl --fail --silent \
+            -H 'Authorization: Bearer tinymemory-cortex-test' \
+            'http://127.0.0.1:3141/v1/scopes/list?limit=10000' \
+            | jq '.items | length'
+        )"
+        if [ "$before" -le 0 ] || [ "$after" -lt "$before" ]; then
+          echo "CortexDB did not preserve simulation scopes across restart" >&2
+          exit 1
+        fi
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "CortexDB did not become ready after restart" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+echo "CortexDB did not become ready within 240 seconds." >&2
+exit 1
