@@ -859,22 +859,31 @@ async fn cortex_recall(State(store): State<CortexStore>, Json(body): Json<Value>
     Json(json!({ "pack_id": "pack_test", "layers": { "events": hits } }))
 }
 
-async fn cortex_answer(Json(body): Json<Value>) -> Json<Value> {
+async fn cortex_answer(Json(body): Json<Value>) -> (axum::http::StatusCode, Json<Value>) {
+    if body.get("use_pack_id").and_then(Value::as_str) != Some("pack_test") {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error_code": "MISSING_PACK" })),
+        );
+    }
     let query = body
         .get("question")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    Json(json!({
-        "answer": format!("grounded answer for {query}"),
-        "citations": [{
-            "id": "evt_answer_source",
-            "key": "answer-source",
-            "content": "grounding evidence",
-            "score": 0.9
-        }],
-        "context_block": "grounding evidence",
-        "diagnostics": { "answer_model": "reasoning" }
-    }))
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({
+            "answer": format!("grounded answer for {query}"),
+            "citations": [{
+                "id": "evt_answer_source",
+                "key": "answer-source",
+                "content": "grounding evidence",
+                "score": 0.9
+            }],
+            "context_block": "grounding evidence",
+            "diagnostics": { "answer_model": "reasoning" }
+        })),
+    )
 }
 
 /// The real engine caps this listing at fifty unless `limit` says otherwise,
@@ -1162,6 +1171,14 @@ async fn cortex_full_provider_ingests_every_product_shape() {
     assert!(answer.answer.contains("When is launch?"));
     assert_eq!(answer.citations.len(), 1);
     assert_eq!(answer.model.as_deref(), Some("reasoning"));
+
+    let global_answer = provider
+        .as_answer()
+        .expect("answer")
+        .answer(AnswerRequest::new("What is globally relevant?"))
+        .await
+        .expect("default global answer request");
+    assert!(!global_answer.answer.is_empty());
 
     let filtered_answer = provider
         .as_answer()

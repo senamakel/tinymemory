@@ -20,7 +20,9 @@ use tinymemory_api::provider::{
     MemoryLearningIngest, MemoryPortability, MemoryProvider, MemoryRecall, RawMemoryEvent,
 };
 use tinymemory_api::recall::OwnedRecallOpts;
-use tinymemory_api::types::{MemoryCategory, MemoryEntry, MemoryTaint, NamespaceSummary};
+use tinymemory_api::types::{
+    MemoryCategory, MemoryEntry, MemoryTaint, NamespaceSummary, GLOBAL_NAMESPACE,
+};
 
 use crate::common::{encode, Attempts, HttpClient};
 use crate::cortex::{CortexDialect, CortexMemory, CORTEX_DRIVER_ID};
@@ -164,6 +166,10 @@ fn idempotency_key(seed: &str) -> String {
 }
 
 fn cortex_role(role: &str) -> &'static str {
+    // Cortex's role is a four-value message class, while IngestItem::author is
+    // deliberately open and often contains a person's name. Known agent roles
+    // retain their class; every other speaker is a human/user. The exact author
+    // is still preserved in the private payload (`x`) beside the indexed text.
     match role.trim().to_ascii_lowercase().as_str() {
         "assistant" => "assistant",
         "tool" => "tool",
@@ -189,6 +195,43 @@ fn category_for(modality: &str) -> MemoryCategory {
         "observation" => MemoryCategory::Core,
         other => MemoryCategory::Custom(other.to_string()),
     }
+}
+
+fn layer_limits(limit: usize) -> Value {
+    const LAYERS: [&str; 5] = ["events", "facts", "beliefs", "episodes", "understanding"];
+    let base = limit / LAYERS.len();
+    let remainder = limit % LAYERS.len();
+    let mut limits = serde_json::Map::new();
+    for (index, layer) in LAYERS.into_iter().enumerate() {
+        limits.insert(
+            layer.to_string(),
+            json!(base + usize::from(index < remainder)),
+        );
+    }
+    Value::Object(limits)
+}
+
+fn observed_at(timestamp: f64) -> Result<String, MemoryError> {
+    if !timestamp.is_finite() {
+        return Err(MemoryError::Invalid(
+            "learning observed_at must be a finite Unix timestamp".to_string(),
+        ));
+    }
+    let seconds = timestamp.floor();
+    if seconds < i64::MIN as f64 || seconds > i64::MAX as f64 {
+        return Err(MemoryError::Invalid(
+            "learning observed_at is outside the supported timestamp range".to_string(),
+        ));
+    }
+    let nanos = ((timestamp - seconds) * 1_000_000_000.0).round();
+    let nanos = nanos.clamp(0.0, 999_999_999.0) as u32;
+    chrono::DateTime::from_timestamp(seconds as i64, nanos)
+        .map(|value| value.to_rfc3339())
+        .ok_or_else(|| {
+            MemoryError::Invalid(
+                "learning observed_at is outside the supported timestamp range".to_string(),
+            )
+        })
 }
 
 #[async_trait]
@@ -405,6 +448,7 @@ impl MemoryLearningIngest for CortexProvider {
             .unwrap_or("unknown")
             .to_string();
         let namespace = format!("learning:{class}");
+        let observed_at = observed_at(learning.observed_at)?;
         let payload = serde_json::to_value(&learning)?;
         let seed = serde_json::to_string(&payload)?;
         let key = format!("learning:{}", learning.key);
@@ -420,7 +464,7 @@ impl MemoryLearningIngest for CortexProvider {
                 taint: MemoryTaint::Internal,
                 payload,
                 idempotency_seed: &seed,
-                observed_at: None,
+                observed_at: Some(observed_at),
                 labels: vec!["tinymemory-learning".to_string(), class],
             })
             .await?;
@@ -470,9 +514,11 @@ impl MemoryAnswer for CortexProvider {
                 "answer query must not be empty and limit must be positive".to_string(),
             ));
         }
-        let namespace = request.recall.namespace.as_deref().ok_or_else(|| {
-            MemoryError::Invalid("CortexDB answers require a recall namespace".to_string())
-        })?;
+        let namespace = request
+            .recall
+            .namespace
+            .as_deref()
+            .unwrap_or(GLOBAL_NAMESPACE);
         if request.scope.is_some()
             || request.recall.category.is_some()
             || request.recall.session_id.is_some()
@@ -493,7 +539,7 @@ impl MemoryAnswer for CortexProvider {
                 Some(&json!({
                     "scope": scope,
                     "query": request.query,
-                    "budgets": { "per_layer_limits": { "events": request.limit } },
+                    "budgets": { "per_layer_limits": layer_limits(request.limit) },
                 })),
                 Attempts::RetryTransient,
             )

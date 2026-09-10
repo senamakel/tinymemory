@@ -78,6 +78,7 @@
 //!   readiness signals.** The first never advances past `captured`; the second
 //!   accepts a connection and emits nothing.
 
+use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -200,6 +201,22 @@ impl CortexMemory {
     }
 
     fn new(endpoint: &str, api_key: Option<&str>) -> anyhow::Result<Self> {
+        if api_key.is_some() {
+            let url =
+                reqwest::Url::parse(endpoint).context("cortex endpoint is not a valid URL")?;
+            if url.scheme() == "http" {
+                let host = url.host_str().unwrap_or_default();
+                let ip_host = host.trim_start_matches('[').trim_end_matches(']');
+                let loopback = host.eq_ignore_ascii_case("localhost")
+                    || ip_host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|address| address.is_loopback());
+                anyhow::ensure!(
+                    loopback,
+                    "credentialed CortexDB endpoints must use HTTPS unless they are loopback"
+                );
+            }
+        }
         Ok(Self {
             inner: RemoteMemory::new(CortexDialect {
                 client: HttpClient::bearer(endpoint, api_key)?,
@@ -211,7 +228,8 @@ impl CortexMemory {
     ///
     /// # Errors
     ///
-    /// Returns an error when `endpoint` is invalid or `api_key` is blank.
+    /// Returns an error when `endpoint` is invalid, `api_key` is blank, or a
+    /// credentialed non-loopback endpoint uses cleartext HTTP.
     pub fn api(endpoint: &str, api_key: &str) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !api_key.trim().is_empty(),
@@ -224,7 +242,8 @@ impl CortexMemory {
     ///
     /// # Errors
     ///
-    /// Returns an error when `endpoint` is invalid or `api_key` is blank.
+    /// Returns an error when `endpoint` is invalid, `api_key` is blank, or a
+    /// credentialed non-loopback endpoint uses cleartext HTTP.
     pub fn self_hosted(endpoint: &str, api_key: &str) -> anyhow::Result<Self> {
         Self::api(endpoint, api_key)
     }
