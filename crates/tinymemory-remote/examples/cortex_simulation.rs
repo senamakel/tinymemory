@@ -153,6 +153,9 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
+    // CortexDialect::scope_of prefixes every slash-delimited TinyMemory
+    // namespace segment with `tm:`; this is `simulation/{suffix}/events` in
+    // CortexDB's scope grammar.
     let event_scope = format!("tm:simulation/tm:{suffix}/tm:events");
     let raw_events: serde_json::Value = reqwest::Client::new()
         .get(format!("{endpoint}/v1/events"))
