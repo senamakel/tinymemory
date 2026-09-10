@@ -2268,6 +2268,18 @@ impl MemoryService {
             .await
             .map_err(|error| into_bus_error(&error))
     }
+
+    /// Closed segments with no summary yet, for a host re-running its own
+    /// summariser over a recap that failed (openhuman#6186).
+    ///
+    /// Appended at the tail for the same positional reason as the member above
+    /// it; its family sits ~900 lines up, around `set_segment_summary`.
+    async fn segments_pending_summary(&self, limit: u32) -> BusResult<Vec<ConversationSegment>> {
+        require_family!(self, as_episodic, Capability::Episodic)
+            .segments_pending_summary(limit)
+            .await
+            .map_err(|error| into_bus_error(&error))
+    }
 }
 
 /// The response-size ceiling for a method that returns a list of entries.

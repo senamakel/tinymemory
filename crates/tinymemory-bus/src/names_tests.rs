@@ -110,6 +110,11 @@ fn the_newest_members_are_appended_rather_than_filed_with_their_family() {
     // v1.13.8 then invokes the wrong member.
     assert_eq!(METHODS[142], methods::BACKFILL_CONNECTOR_TREES);
     assert_eq!(methods::BACKFILL_CONNECTOR_TREES, "BackfillConnectorTrees");
+    // Re-summarisation round (openhuman#6186): slot 143. Its family — the
+    // episodic segment members — sits at 55-63, and filing it there would
+    // renumber every member from 56 on.
+    assert_eq!(METHODS[143], methods::SEGMENTS_PENDING_SUMMARY);
+    assert_eq!(methods::SEGMENTS_PENDING_SUMMARY, "SegmentsPendingSummary");
 }
 
 #[test]
@@ -150,7 +155,7 @@ fn the_runtime_tree_doors_hold_the_wire_slots_they_were_released_in() {
     // reason the summariser-door test above gives: member order is wire order,
     // and an assertion measured from the end moves silently under the next
     // append — which is exactly the edit this exists to catch.
-    assert_eq!(METHODS.len(), 143);
+    assert_eq!(METHODS.len(), 144);
     assert_eq!(METHODS[131], methods::RUNTIME_BUFFER_WRITE);
     assert_eq!(METHODS[132], methods::RUNTIME_READ_NODE);
     assert_eq!(METHODS[133], methods::RUNTIME_READ_CHILDREN);

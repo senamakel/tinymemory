@@ -695,6 +695,9 @@ const EXPECTED_METHODS: &[&str] = &[
     "LatestQueueFailure",
     "BackfillInProgress",
     "FlushPending",
+    // openhuman#6186. Set-compared like the member below, so it files with its
+    // family rather than at the tail.
+    "SegmentsPendingSummary",
     // openhuman#6012. Compared as a set (`BTreeSet`), so this sits with its
     // family rather than at the tail — unlike `tinymemory_bus::METHODS` and the
     // `#[tinybus::interface]` impl block, which are positional and append-only.
