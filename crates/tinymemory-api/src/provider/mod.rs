@@ -103,7 +103,9 @@ pub use diagnosis::{
     DegradedCapabilities, Diagnosis, DiagnosisCounters, DiagnosisFailure, DiagnosisStage,
 };
 pub use driver::MemoryProvider;
-pub use episodic::{ConversationSegment, EpisodicEvent, EpisodicTurn, EventKind, MemoryEpisodic};
+pub use episodic::{
+    ConversationSegment, EpisodicEvent, EpisodicTurn, EventKind, MemoryEpisodic, SegmentStatus,
+};
 pub use knowledge::{MemoryDiff, MemoryEntities, MemoryGraph, INBOUND_SCAN_LIMIT};
 pub use mandatory::{MemoryCore, MemoryPortability, MemoryRecall};
 pub use operations::{

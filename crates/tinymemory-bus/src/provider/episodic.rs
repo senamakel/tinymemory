@@ -76,6 +76,26 @@ pub struct EpisodicTurn {
     pub cost_microdollars: i64,
 }
 
+/// Where a segment sits in its lifecycle.
+///
+/// The wire carries the same lowercase identifiers the engine persists, so a
+/// stored row and a contract payload spell each state the same way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentStatus {
+    /// Accepting turns.
+    Open,
+    /// No longer accepting turns, and not yet summarised.
+    ///
+    /// This is the state a segment is left in when its recap failed — the
+    /// marker a re-summarisation pass selects on (oh#6186). It is reached on
+    /// the ordinary path too, for the window between closing a segment and
+    /// writing its summary.
+    Closed,
+    /// Closed, with a summary written.
+    Summarised,
+}
+
 /// A stretch of consecutive turns about one subject.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConversationSegment {
@@ -109,7 +129,23 @@ pub struct ConversationSegment {
     #[serde(default)]
     pub embedding: Option<Vec<f32>>,
     /// Whether the segment is still open.
+    ///
+    /// Retained as the original contract vocabulary. It cannot distinguish a
+    /// segment that was closed and summarised from one that was closed and
+    /// left unsummarised — both are `false` — which is what [`Self::status`]
+    /// exists to answer.
     pub open: bool,
+    /// Where the segment sits in the `open -> closed -> summarised` lifecycle,
+    /// when the driver reports it.
+    ///
+    /// `None` means the driver predates this field, not that the status is
+    /// unknown-but-knowable: a host must treat it as "cannot tell" and skip
+    /// the segment rather than infer one from [`Self::open`] or a `NULL`
+    /// summary (oh#6186). Both of those are ambiguous — a segment can be
+    /// legitimately summarised with no summary text when it had nothing to
+    /// fold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<SegmentStatus>,
     /// Stable per-session sequence of the first user turn, when the backing
     /// store assigns one. The md-backed archivist store rounds timestamps to
     /// milliseconds, so a fast turn can sort before its segment's
@@ -180,3 +216,7 @@ pub struct EpisodicEvent {
     /// When the event was recorded, seconds since the epoch.
     pub created_at: f64,
 }
+
+#[cfg(test)]
+#[path = "episodic_tests.rs"]
+mod tests;

@@ -605,3 +605,81 @@ fn the_front_matter_strip_decides_built_versus_not_the_way_the_host_did() {
         "plain body, no front matter"
     );
 }
+
+// ── Error provenance (oh#6179) and the segment lifecycle marker (oh#6186) ────
+
+/// `other` renders the whole `anyhow` chain, not just its outermost context.
+///
+/// This is the regression from oh#6179. `{error}` on an `anyhow::Error` prints
+/// only the last context attached to it, so a summariser failure reached the
+/// host as `memory_tree::summarise: provider=…` with the transport error
+/// underneath it discarded. That string is then all a host has — the bus
+/// carries a code and a message, not a chain — so the report was
+/// unroot-causable and there was no typed error left for a caller to classify.
+#[test]
+fn other_preserves_the_whole_cause_chain() {
+    let cause = anyhow::anyhow!("error sending request")
+        .context("memory_tree::summarise: provider=inference:summarization-v1");
+
+    let wrapped = super::TinycortexProvider::other("summarise tree inputs", cause);
+
+    let rendered = wrapped.to_string();
+    assert!(
+        rendered.contains("summarise tree inputs"),
+        "the call site is missing: {rendered}"
+    );
+    assert!(
+        rendered.contains("provider=inference:summarization-v1"),
+        "the provider context is missing: {rendered}"
+    );
+    assert!(
+        rendered.contains("error sending request"),
+        "the root cause was dropped — this is oh#6179: {rendered}"
+    );
+}
+
+/// A closed-but-unsummarised segment reaches the contract as `Closed`, not
+/// merely as `open: false`.
+///
+/// `open` is retained and still false for both closed states, so this pins the
+/// pair rather than the new field alone: the bug oh#6186 describes is not that
+/// `open` was wrong, it is that it was the only thing a host could see.
+#[test]
+fn a_closed_segment_carries_its_status_to_the_contract() {
+    use tinymemory_api::provider::episodic::SegmentStatus as ContractStatus;
+    use tinymemory_core::store::segments::{ConversationSegment as Row, SegmentStatus};
+
+    let row = |status: SegmentStatus| Row {
+        segment_id: "seg-1".to_string(),
+        session_id: "sess-1".to_string(),
+        namespace: "ns".to_string(),
+        start_episodic_id: 1,
+        end_episodic_id: Some(9),
+        start_timestamp: 0.0,
+        end_timestamp: Some(1.0),
+        turn_count: 4,
+        summary: None,
+        embedding: None,
+        topic_keywords: None,
+        status,
+        created_at: 0.0,
+        updated_at: 1.0,
+        start_seq: None,
+        end_seq: None,
+    };
+
+    let closed = super::segment_to_contract(row(SegmentStatus::Closed));
+    let summarised = super::segment_to_contract(row(SegmentStatus::Summarised));
+    let open = super::segment_to_contract(row(SegmentStatus::Open));
+
+    assert_eq!(closed.status, Some(ContractStatus::Closed));
+    assert_eq!(summarised.status, Some(ContractStatus::Summarised));
+    assert_eq!(open.status, Some(ContractStatus::Open));
+
+    assert!(!closed.open, "a closed segment must not report as open");
+    assert_eq!(
+        closed.open, summarised.open,
+        "`open` is deliberately unchanged — `status` is what separates these"
+    );
+    assert!(open.open);
+}

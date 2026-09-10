@@ -1370,6 +1370,17 @@ impl MemoryEpisodic for RecordingProvider {
         Ok(None)
     }
 
+    /// Recorded rather than left to the trait default: the default answers
+    /// `Ok(vec![])` too, but silently, and a recorder that does not see the
+    /// call cannot hold a caller to making it.
+    async fn segments_pending_summary(
+        &self,
+        _limit: u32,
+    ) -> Result<Vec<tinymemory_api::provider::episodic::ConversationSegment>, MemoryError> {
+        self.record(Call::plain("episodic.segments_pending_summary"));
+        Ok(vec![])
+    }
+
     async fn create_segment(
         &self,
         _segment_id: &str,

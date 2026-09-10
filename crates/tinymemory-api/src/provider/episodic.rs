@@ -49,7 +49,7 @@ use crate::error::MemoryError;
 // able to name them without compiling this trait — and re-exported here so
 // every historical path keeps resolving and the types stay the same types.
 pub use tinymemory_bus::provider::episodic::{
-    ConversationSegment, EpisodicEvent, EpisodicTurn, EventKind,
+    ConversationSegment, EpisodicEvent, EpisodicTurn, EventKind, SegmentStatus,
 };
 
 /// The turn-by-turn conversation record.
@@ -173,4 +173,40 @@ pub trait MemoryEpisodic: Send + Sync {
         embedding: &[f32],
         created_at: f64,
     ) -> Result<(), MemoryError>;
+
+    /// Closed segments that carry no summary yet, oldest first, capped at
+    /// `limit`.
+    ///
+    /// The recovery half of the recap contract (oh#6186). When a summariser
+    /// fails, the caller is expected to write **nothing** — the driver does not
+    /// substitute a fallback (see
+    /// [`MemoryTree::summarise`](super::content::MemoryTree::summarise)), and a
+    /// caller that persisted one would flip the segment to summarised and lose
+    /// the fact that it never was. That leaves the segment closed with no summary, which
+    /// is the marker this selects on: no schema addition, and no state a driver
+    /// has to start recording.
+    ///
+    /// A caller re-runs its own summariser over the returned segments' turns
+    /// and writes through [`Self::set_segment_summary`] on success only. The
+    /// summariser stays the caller's precisely because it is the same one that
+    /// produced every other summary in the tree; a second one here would put
+    /// two differently-prompted summaries in one tier.
+    ///
+    /// Ordered oldest-first, which a caller must not treat as a work queue that
+    /// drains on its own: a segment nothing can ever summarise stays at the
+    /// head. Bounding the retries per segment is the caller's job.
+    ///
+    /// Defaulted to empty so a driver that has no notion of segment lifecycle
+    /// is not forced to grow one. Empty means "none pending", which for such a
+    /// driver is true.
+    ///
+    /// # Errors
+    ///
+    /// Backend failures only.
+    async fn segments_pending_summary(
+        &self,
+        _limit: u32,
+    ) -> Result<Vec<ConversationSegment>, MemoryError> {
+        Ok(Vec::new())
+    }
 }

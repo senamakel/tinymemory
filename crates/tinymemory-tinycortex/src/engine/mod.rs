@@ -361,8 +361,20 @@ impl TinycortexProvider {
         }
     }
 
+    /// Wrap a failure as [`MemoryError::Other`], prefixed with the call it
+    /// came from.
+    ///
+    /// The `{error:#}` is load-bearing (oh#6179). Almost every caller passes an
+    /// `anyhow::Error`, whose plain `Display` renders **only its outermost
+    /// context** — so `{error}` here reduced a summariser failure to
+    /// `memory_tree::summarise: provider=inference:summarization-v1` and threw
+    /// away the transport error underneath it. That string then crosses the bus
+    /// as an opaque `Error.Other`, leaving the host with a report it cannot
+    /// root-cause and no typed error left to classify. The alternate flag
+    /// renders the whole chain instead; on the non-`anyhow` callers (`&str`,
+    /// `serde_json::Error`) it is a no-op.
     fn other(context: &'static str, error: impl std::fmt::Display) -> MemoryError {
-        MemoryError::Other(anyhow::anyhow!("{context}: {error}"))
+        MemoryError::Other(anyhow::anyhow!("{context}: {error:#}"))
     }
 
     fn cross<A: serde::Serialize, B: serde::de::DeserializeOwned>(
@@ -4582,6 +4594,21 @@ impl MemoryEpisodic for TinycortexProvider {
         Ok(entries.into_iter().map(episodic_to_contract).collect())
     }
 
+    async fn segments_pending_summary(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<ConversationSegment>, MemoryError> {
+        let conn = self.client.profile_conn();
+        let limit = limit as usize;
+        let segments = tokio::task::spawn_blocking(move || {
+            tinymemory_core::store::segments::segments_pending_summary(&conn, limit)
+        })
+        .await
+        .map_err(|e| Self::other("join segments_pending_summary", e))?
+        .map_err(|e| Self::other("segments_pending_summary", e))?;
+        Ok(segments.into_iter().map(segment_to_contract).collect())
+    }
+
     async fn open_segment(
         &self,
         session_id: &str,
@@ -4763,6 +4790,7 @@ fn episodic_to_contract(entry: tinymemory_core::store::fts5::EpisodicEntry) -> E
 fn segment_to_contract(
     segment: tinymemory_core::store::segments::ConversationSegment,
 ) -> ConversationSegment {
+    use tinymemory_api::provider::episodic::SegmentStatus as ContractStatus;
     use tinymemory_core::store::segments::SegmentStatus;
     ConversationSegment {
         segment_id: segment.segment_id,
@@ -4776,6 +4804,15 @@ fn segment_to_contract(
         summary: segment.summary,
         embedding: segment.embedding,
         open: matches!(segment.status, SegmentStatus::Open),
+        // `open` alone collapses `Closed` and `Summarised` onto `false`, which
+        // is what left a host unable to find the segments a failed recap left
+        // unsummarised (oh#6186). Both are reported now; `open` stays for the
+        // callers that only ever asked the coarser question.
+        status: Some(match segment.status {
+            SegmentStatus::Open => ContractStatus::Open,
+            SegmentStatus::Closed => ContractStatus::Closed,
+            SegmentStatus::Summarised => ContractStatus::Summarised,
+        }),
         start_seq: segment.start_seq,
         end_seq: segment.end_seq,
     }

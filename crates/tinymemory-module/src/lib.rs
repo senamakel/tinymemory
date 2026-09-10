@@ -648,6 +648,9 @@ mod exports {
             "LatestQueueFailure",
             "BackfillInProgress",
             "FlushPending",
+            // Closed-but-unsummarised segments, for the host re-summarisation
+            // pass (openhuman#6186). Beside its family: this list is a SET.
+            "SegmentsPendingSummary",
             // Re-files connector documents stored before the routing fix
             // (openhuman#6007) into the memory tree. Declared beside its
             // family here because this list is compared as a SET; the

@@ -312,6 +312,8 @@ pub mod methods {
     pub const CLOSE_SEGMENT: &str = "CloseSegment";
     /// `SetSegmentSummary` — set segment summary.
     pub const SET_SEGMENT_SUMMARY: &str = "SetSegmentSummary";
+    /// `SegmentsPendingSummary` — closed segments with no summary yet.
+    pub const SEGMENTS_PENDING_SUMMARY: &str = "SegmentsPendingSummary";
     /// `UpsertSegmentEmbedding` — upsert segment embedding.
     pub const UPSERT_SEGMENT_EMBEDDING: &str = "UpsertSegmentEmbedding";
     /// `InsertEvent` — record one extracted event against its segment.
@@ -377,7 +379,7 @@ pub mod methods {
 /// The order matters: `tinybus`'s `Interface::members()` returns declaration
 /// order, and the module compares the two sequences directly rather than as
 /// sets, so a reordering is caught alongside an addition or a removal.
-pub const METHODS: [&str; 143] = [
+pub const METHODS: [&str; 144] = [
     methods::DRIVER_ID,
     methods::CAPABILITIES,
     methods::HEALTH,
@@ -525,6 +527,10 @@ pub const METHODS: [&str; 143] = [
     // its family lives, would renumber every member after it and invoke the
     // wrong method on a host built against an earlier release.
     methods::BACKFILL_CONNECTOR_TREES,
+    // Re-summarisation round (openhuman#6186): appended at the tail for the
+    // same reason as the round above it. Its family sits at slots 55-63; filed
+    // there it would have renumbered all eighty members after it.
+    methods::SEGMENTS_PENDING_SUMMARY,
 ];
 
 #[cfg(test)]
