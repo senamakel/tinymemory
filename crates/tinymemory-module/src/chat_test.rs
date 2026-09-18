@@ -3,9 +3,9 @@
 use tinybus::broker::Broker;
 use tinybus::transport::memory::MemoryBus;
 use tinybus::{Connection, Result as BusResult};
-use tinyinference_core::message::{AssistantMessage, ContentBlock, Message};
-use tinyinference_core::model::{ModelRequest, ModelResponse};
-use tinyinference_core::usage::Usage;
+use tinyinference_llm::message::{AssistantMessage, ContentBlock, Message};
+use tinyinference_llm::model::{ModelRequest, ModelResponse};
+use tinyinference_llm::usage::Usage;
 
 use super::{BusChatHost, CHAT_HOST_BUS_NAME, CHAT_HOST_OBJECT_PATH};
 use crate::config::ModuleConfig;

@@ -1740,7 +1740,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -1793,7 +1793,8 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "tinycortex-api",
- "tinyinference-core",
+ "tinyinference-embeddings",
+ "tinyinference-llm",
  "tokio",
  "toml",
  "tracing",
@@ -1813,16 +1814,38 @@ name = "tinyinference-core"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "httpdate",
+ "url",
+]
+
+[[package]]
+name = "tinyinference-embeddings"
+version = "0.2.1"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tinyinference-core",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "tinyinference-llm"
+version = "0.2.1"
+dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "hex",
- "httpdate",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "tinyinference-core",
  "tokio",
  "tracing",
  "url",
@@ -1910,7 +1933,8 @@ dependencies = [
  "thiserror",
  "tinycortex",
  "tinycortex-api",
- "tinyinference-core",
+ "tinyinference-embeddings",
+ "tinyinference-llm",
  "tinymemory",
  "tinymemory-api",
  "tinymemory-conformance",
