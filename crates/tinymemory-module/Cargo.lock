@@ -1762,7 +1762,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "tinycortex-api",
- "tinyinference",
+ "tinyinference-core",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
@@ -1778,12 +1778,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinyinference"
+name = "tinyinference-core"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "futures",
+ "hex",
  "httpdate",
  "reqwest",
  "serde",
@@ -1791,6 +1793,8 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1852,7 +1856,7 @@ dependencies = [
  "thiserror",
  "tinycortex",
  "tinycortex-api",
- "tinyinference",
+ "tinyinference-core",
  "tinymemory-api",
  "tinymemory-sources",
  "tinymemory-sync",
@@ -1877,7 +1881,7 @@ dependencies = [
  "tinybus",
  "tinybus-module",
  "tinycortex",
- "tinyinference",
+ "tinyinference-core",
  "tinymemory",
  "tinymemory-api",
  "tinymemory-bus",

@@ -78,7 +78,7 @@ tinymemory-api = { path = "crates/tinymemory-api" }
 # source onto the same checkout `tinymemory-core` resolves through crates.io so
 # both crates share one trait identity.
 [patch."https://github.com/tinyhumansai/tinyinference"]
-tinyinference = { path = "vendor/tinyinference/crates/tinyinference" }
+tinyinference-core = { path = "vendor/tinyinference/crates/tinyinference-core" }
 
 [patch.crates-io]
 tinycortex = { path = "vendor/tinycortex" }
@@ -86,7 +86,7 @@ tinycortex-api = { path = "vendor/tinycortex/api" }
 # `tinymemory-core` names the provider-neutral chat and embedding contracts
 # from TinyInference. It is not published, so standalone builds resolve the
 # version requirement to the pinned checkout here.
-tinyinference = { path = "vendor/tinyinference/crates/tinyinference" }
+tinyinference-core = { path = "vendor/tinyinference/crates/tinyinference-core" }
 
 [profile.release]
 # Cross-crate optimization and smaller, faster binaries for release builds.

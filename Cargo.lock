@@ -1740,7 +1740,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -1793,7 +1793,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "tinycortex-api",
- "tinyinference",
+ "tinyinference-core",
  "tokio",
  "toml",
  "tracing",
@@ -1809,12 +1809,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinyinference"
+name = "tinyinference-core"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "futures",
+ "hex",
  "httpdate",
  "reqwest",
  "serde",
@@ -1822,6 +1824,8 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1906,7 +1910,7 @@ dependencies = [
  "thiserror",
  "tinycortex",
  "tinycortex-api",
- "tinyinference",
+ "tinyinference-core",
  "tinymemory",
  "tinymemory-api",
  "tinymemory-conformance",
