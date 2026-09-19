@@ -47,8 +47,6 @@ tinymemory-conformance = { path = "../tinymemory-conformance", optional = true }
 async-trait = "0.1"
 # `Memory` is anyhow-typed; `mandatory::engine_error` maps it onto `MemoryError`.
 anyhow = "1"
-# Diagnostics on the shared store/recall/export paths.
-log = "0.4"
 # `ExportRecord::payload` is a `serde_json::Value`.
 serde_json = "1"
 
