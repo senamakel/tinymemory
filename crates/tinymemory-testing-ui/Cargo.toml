@@ -13,7 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 # The engine-neutral contract this harness drives every engine through.
-tinymemory = { path = "../tinymemory" }
 tinymemory-api = { path = "../tinymemory-api" }
 # The TinyCortex adapter backs the "local" engine choice (in-process, no
 # network, no API key). Re-exports the `tinycortex` engine crate itself
