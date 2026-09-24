@@ -135,6 +135,7 @@ impl HostChat {
                 content: vec![ContentBlock::Text("deterministic summary".into())],
                 tool_calls: Vec::new(),
                 usage: Some(Usage::new(2, 1)),
+                origin: None,
             },
             usage: Some(Usage::new(2, 1)),
             finish_reason: Some("stop".into()),
@@ -142,6 +143,8 @@ impl HostChat {
             resolved_model: None,
             continue_turn: None,
             served_from_cache: false,
+            correlation: None,
+            resolved_route: None,
         })
     }
 }
