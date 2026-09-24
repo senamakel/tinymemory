@@ -16,11 +16,6 @@ readme = "../../README.md"
 # The contract. `tinymemory-core` implements and consumes it; the host seam
 # traits (config, event sink, embeddings, chat) live in `tinymemory_api::host`.
 tinymemory-api = { path = "../tinymemory-api" }
-# Composio payload normalisers, extracted out of the engine (issue #18 §B3).
-# They were reached through `tinycortex` until now, which meant a host binding a
-# different engine could not have Composio sync despite none of this code
-# caring which engine is bound.
-tinymemory-sync = { path = "../tinymemory-sync" }
 # The memory-source contracts and readers (#18 §B4). `network` because this
 # crate's sync path drives the GitHub/RSS/web-page readers; a host that only
 # reads local folders can take the crate without them.
@@ -31,11 +26,8 @@ tinymemory-sources = { path = "../tinymemory-sources", features = ["network"] }
 # real consumer.
 regex = "1.10"
 
-# The default embedded engine. `store/`, `tree/` and `sync/` drive it directly;
-# `tinycortex-api` is a direct dependency because `tinycortex::memory` aliases
-# back only `{error, traits, types}`.
+# The default embedded engine. `store/`, `tree/` and `sync/` drive it directly.
 tinycortex = { version = "0.1", features = ["obsidian", "persona", "people", "sync"] }
-tinycortex-api = { version = "0.1" }
 
 # Provider-neutral chat-model and embedding primitives used by the tree
 # summarizer and embedding factory. Agent runtime and session behavior do not
@@ -56,7 +48,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # `tinycortex/persona.rs` resolves the user's home directory for the obsidian
 # vault default.
 dirs = "6"
-futures = "0.3"
 log = "0.4"
 parking_lot = "0.12"
 # `tree/tree/registry.rs` salts a tree id; the sync readers talk HTTP to the
@@ -70,14 +61,10 @@ serde_json = "1"
 sha2 = "0.11"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
-url = "2"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
 [dev-dependencies]
-# The ported Composio connect tests stand up a mock HTTP server (#18 §B1),
-# exactly as they did in the engine.
-wiremock = "0.6"
 # `TestHostConfig` — the concrete `MemoryHostConfig` the extracted test suites
 # build, since `Config` is a trait object and cannot be `Default`ed.
 tinymemory-api = { path = "../tinymemory-api", features = ["test-support"] }
