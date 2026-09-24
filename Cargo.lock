@@ -194,9 +194,9 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -298,6 +298,15 @@ name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -1360,9 +1369,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -1384,9 +1393,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -1664,7 +1673,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -1698,7 +1707,7 @@ dependencies = [
  "async-trait",
  "block2",
  "chrono",
- "dirs",
+ "dirs 7.0.0",
  "futures",
  "git2",
  "hex",
@@ -1717,7 +1726,8 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "tinycortex-api",
- "tinyinference",
+ "tinyinference-embeddings",
+ "tinyinference-llm",
  "tokio",
  "toml",
  "tracing",
@@ -1733,19 +1743,47 @@ dependencies = [
 ]
 
 [[package]]
-name = "tinyinference"
-version = "0.2.1"
+name = "tinyinference-core"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "httpdate",
+ "url",
+]
+
+[[package]]
+name = "tinyinference-embeddings"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tinyinference-core",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "tinyinference-llm"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "httpdate",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "tinyinference-core",
+ "tinytools-agent",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1814,7 +1852,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
- "dirs",
+ "dirs 6.0.0",
  "log",
  "parking_lot",
  "rand 0.10.2",
@@ -1827,7 +1865,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tinycortex",
- "tinyinference",
+ "tinyinference-embeddings",
+ "tinyinference-llm",
  "tinymemory",
  "tinymemory-api",
  "tinymemory-conformance",
@@ -1940,6 +1979,28 @@ dependencies = [
  "tinymemory-core",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "tinytools"
+version = "0.3.0"
+source = "git+https://github.com/tinyhumansai/tinytools?rev=a5d04a7f3af0abc1dd748f87f94871b36ae9fe71#a5d04a7f3af0abc1dd748f87f94871b36ae9fe71"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tinytools-agent"
+version = "0.3.0"
+source = "git+https://github.com/tinyhumansai/tinytools?rev=a5d04a7f3af0abc1dd748f87f94871b36ae9fe71#a5d04a7f3af0abc1dd748f87f94871b36ae9fe71"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "tinytools",
 ]
 
 [[package]]
