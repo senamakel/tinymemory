@@ -69,3 +69,5 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# TinyInference's pinned tinytools-agent dependency is a sibling TinyHumans repo.
+allow-git = ["https://github.com/tinyhumansai/tinytools"]
