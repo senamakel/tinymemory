@@ -1,7 +1,6 @@
 //! Public linked-module entry points remain callable by a Rust host.
 
 #![cfg(feature = "static-link")]
-#![allow(unsafe_code)]
 
 use tinybus::broker::Broker;
 use tinybus::module::abi::{TbModuleInit, TbSlice, ABI_MAGIC};
@@ -25,6 +24,7 @@ fn linked_module_exposes_its_descriptor_manifest_and_initializer() {
     assert_ne!(initialize as usize, 0);
 }
 
+#[allow(unsafe_code)]
 #[tokio::test]
 async fn linked_module_serves_memory_calls_through_tinybus(
 ) -> Result<(), Box<dyn std::error::Error>> {
