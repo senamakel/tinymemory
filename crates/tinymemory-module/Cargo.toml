@@ -21,6 +21,9 @@ publish = false
 # without going through the loader; the `cdylib` is what a release ships.
 crate-type = ["rlib", "cdylib"]
 
+[features]
+linked = []
+
 [dependencies]
 # The contract. Every type crossing the bus is one of these, and all of them
 # already carry serde impls — which is why this module needs no `wire` module of
@@ -57,12 +60,12 @@ tinyinference-llm = "0.3"
 # TinyBus provides the typed service interface and the dynamic module host ABI.
 # Reached by path now that this crate is its own workspace root: the nested
 # checkout's `[workspace.package]` resolves correctly from here.
-tinybus = { version = "0.1.0", path = "../../vendor/tinybus/crates/tinybus", default-features = false, features = [
+tinybus = { version = "=0.1.2", default-features = false, features = [
     "macros",
     "modules",
 ] }
 # The module-side SDK owns its runtime and exports the stable C entrypoints.
-tinybus-module = { version = "0.1.0", path = "../../vendor/tinybus/crates/tinybus-module" }
+tinybus-module = "=0.1.2"
 # `EmbeddingProvider::embed` is an `async fn` on an object-safe trait.
 async-trait = "0.1"
 # `EmbeddingProvider::embed` is anyhow-typed.
@@ -117,6 +120,9 @@ tinyinference-embeddings = { path = "../../vendor/tinyinference/crates/tinyinfer
 tinyinference-llm = { path = "../../vendor/tinyinference/crates/tinyinference-llm" }
 
 [patch.crates-io]
+tinybus = { path = "../../vendor/tinybus/crates/tinybus" }
+tinybus-module = { path = "../../vendor/tinybus/crates/tinybus-module" }
+tinybus-macros = { path = "../../vendor/tinybus/crates/tinybus-macros" }
 tinycortex = { path = "../../vendor/tinycortex" }
 tinycortex-api = { path = "../../vendor/tinycortex/api" }
 tinyinference-core = { path = "../../vendor/tinyinference/crates/tinyinference-core" }

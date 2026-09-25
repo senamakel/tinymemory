@@ -731,3 +731,6 @@ mod exports {
         lazy = false,
     }
 }
+
+#[cfg(feature = "linked")]
+pub use exports::linked_module;
