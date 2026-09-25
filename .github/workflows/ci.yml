@@ -390,12 +390,14 @@ jobs:
             --features static-link --test static_link
 
       # The module is excluded from the root workspace, so the root coverage
-      # gate cannot see it. Hold its production code to the same floor here.
+      # gate cannot see it. Measure the default dynamic build here because the
+      # loader E2E supplies most dispatch coverage and cannot load a linked-mode
+      # artifact. The static feature has its own test and clippy step above.
       - name: Enforce module production-source coverage
         run: |
           set -euo pipefail
           cargo llvm-cov --manifest-path crates/tinymemory-module/Cargo.toml \
-            --workspace --all-features \
+            --workspace \
             --ignore-filename-regex '(^|/)(tests|vendor)/|(^|/)(test|tests|test_helpers|test_support|test_seams)\.rs$|(_test|_tests|_test_support)\.rs$|/crates/tinymemory-core/src/(engine/parity|tree/retrieval/benchmarks)\.rs$|/crates/tinymemory-conformance/src/reference/full\.rs$' \
             --fail-under-lines 80 --summary-only \
             | tee "$GITHUB_STEP_SUMMARY"
