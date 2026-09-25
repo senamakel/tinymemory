@@ -58,8 +58,8 @@ tinycortex = { version = "0.1", features = ["contacts"] }
 # Provider-neutral chat request and response types carried over TinyBus.
 tinyinference-llm = "0.3"
 # TinyBus provides the typed service interface and the dynamic module host ABI.
-# Reached by path now that this crate is its own workspace root: the nested
-# checkout's `[workspace.package]` resolves correctly from here.
+# The registry identity lets an embedding host use its own TinyBus patch;
+# standalone builds use this workspace's local patch below.
 tinybus = { version = "=0.1.2", default-features = false, features = [
     "macros",
     "modules",
