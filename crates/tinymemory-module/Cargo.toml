@@ -21,6 +21,11 @@ publish = false
 # without going through the loader; the `cdylib` is what a release ships.
 crate-type = ["rlib", "cdylib"]
 
+[features]
+# Link this module into a host and use Rust-addressable ABI entry points.
+# The default keeps the existing loadable cdylib exports.
+static-link = []
+
 [dependencies]
 # The contract. Every type crossing the bus is one of these, and all of them
 # already carry serde impls — which is why this module needs no `wire` module of
