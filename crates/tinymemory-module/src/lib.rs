@@ -507,7 +507,7 @@ fn setup_error(message: impl Into<String>) -> BusError {
     reason = "generated C ABI symbols are documented by the TinyBus module SDK"
 )]
 mod exports {
-    tinybus_module::module_export! {
+    tinybus_module::module_export_optional_static! {
         setup = super::setup,
         config = super::ModuleConfig,
         // Eight, derived rather than picked. Two are the floor this module has
@@ -732,5 +732,5 @@ mod exports {
     }
 }
 
-#[cfg(feature = "linked")]
+#[cfg(feature = "static-link")]
 pub use exports::linked_module;

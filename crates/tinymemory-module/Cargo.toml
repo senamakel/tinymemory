@@ -22,7 +22,7 @@ publish = false
 crate-type = ["rlib", "cdylib"]
 
 [features]
-linked = []
+static-link = []
 
 [dependencies]
 # The contract. Every type crossing the bus is one of these, and all of them
