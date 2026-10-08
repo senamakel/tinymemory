@@ -212,11 +212,7 @@ fn mark_taint(row: &DocRow, tags: &mut Vec<String>) {
 /// Whether the workspace leaves out a row of this logical namespace as a
 /// connector sync; the one test the documents scan and [`count`] share.
 fn skipped(ws: &LegacyWorkspace, logical: &str) -> bool {
-    let skip = ws.skip_connector_syncs && super::connector::is_connector_namespace(logical);
-    if skip {
-        tracing_free_note();
-    }
-    skip
+    ws.skip_connector_syncs && super::connector::is_connector_namespace(logical)
 }
 
 fn logical_namespace(row: &DocRow) -> String {

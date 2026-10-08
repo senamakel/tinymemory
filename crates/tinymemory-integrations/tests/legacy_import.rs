@@ -1889,3 +1889,183 @@ fn an_empty_profile_tree_or_a_bad_suffix_is_not_a_store() {
         assert!(matches!(err, Error::NotLegacy { .. }), "{bad}: {err:?}");
     }
 }
+
+/// A workspace holding both connector syncs and the data that must stay.
+fn with_connector_syncs() -> tempfile::TempDir {
+    let (dir, conn) = workspace(&format!("{}{}", support::MEMORY_DDL, support::GRAPH_DDL));
+    let add = |id: &str, ns: &str, logical: &str, content: &str| {
+        doc(&conn, id, ns, Some(logical), "t", content, "[]", "{}", T0);
+    };
+    add("c01", "skill-gmail", "skill-gmail", "composio mail");
+    add("c02", "source_gmail_c1", "source:gmail:c1", "connector doc");
+    add("c03", "document_notes", "document:notes", "my notes");
+    add("c04", "global", "global", "agent flow note");
+    conn.execute(
+        "UPDATE memory_docs SET taint = 'external_sync' WHERE document_id IN ('c01', 'c04')",
+        [],
+    )
+    .unwrap();
+    facet(
+        &conn,
+        "skill-gmail-c1-name",
+        "identity",
+        "skill:gmail:name",
+        "Ann",
+        0.9,
+        T0,
+        "active",
+        "auto",
+        None,
+    );
+    facet(
+        &conn,
+        "f-normal",
+        "preference",
+        "tone",
+        "terse",
+        0.9,
+        T0,
+        "active",
+        "auto",
+        None,
+    );
+    for (ns, object) in [
+        ("skill-slack", "a"),
+        ("source:notion:c", "b"),
+        ("source_notion_c", "c"),
+        ("document:notes", "d"),
+    ] {
+        conn.execute(
+            "INSERT INTO graph_namespace (namespace, subject, predicate, object, attrs_json, updated_at) \
+             VALUES (?1, 's', 'p', ?2, '{}', 1.0)",
+            rusqlite::params![ns, object],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO graph_global (subject, predicate, object, attrs_json, updated_at) \
+         VALUES ('s', 'p', 'g', '{}', 1.0)",
+        [],
+    )
+    .unwrap();
+    let chunks = chunk_store(dir.path());
+    for (id, kind, source) in [
+        ("k01", "email", "thread-1"),
+        ("k02", "chat", "slack:conn1"),
+        ("k03", "document", "notion:conn1:page"),
+        ("k04", "document", "github:c:issue"),
+        ("k05", "document", "linear:c:i"),
+        ("k06", "document", "clickup:c:t"),
+        ("k07", "document", "gmail:c:m"),
+        ("k08", "document", "other-owner-sync"),
+        ("k09", "document", "mem_src:folder"),
+        ("k10", "chat", "conversations:agent"),
+    ] {
+        chunk(&chunks, id, kind, source, 0, 1_000, "text", "[]", None);
+    }
+    chunks
+        .execute(
+            "UPDATE mem_tree_chunks SET owner = 'jira-sync:conn1' WHERE id = 'k08'",
+            [],
+        )
+        .unwrap();
+    dir
+}
+
+fn legacy_ids(ws: &LegacyWorkspace) -> Vec<String> {
+    all(ws).iter().map(|i| source_id(&i.item)).collect()
+}
+
+#[test]
+fn connector_syncs_are_imported_unless_skipped() {
+    let dir = with_connector_syncs();
+    let ws = LegacyWorkspace::open(dir.path()).unwrap();
+    let ids = legacy_ids(&ws);
+    for id in [
+        "memory_docs:c01",
+        "memory_docs:c02",
+        "user_profile:skill-gmail-c1-name",
+        "mem_tree_chunks:email:thread-1",
+        "mem_tree_chunks:document:other-owner-sync",
+    ] {
+        assert!(
+            ids.iter().any(|i| i == id),
+            "{id} missing by default: {ids:?}"
+        );
+    }
+    assert_eq!(ws.counts().unwrap(), counted(&all(&ws)));
+}
+
+#[test]
+fn skip_connector_syncs_drops_exactly_the_connector_rows() {
+    let dir = with_connector_syncs();
+    let ws = LegacyWorkspace::open(dir.path())
+        .unwrap()
+        .skip_connector_syncs(true);
+    let ids = legacy_ids(&ws);
+    let mut expected = vec![
+        "memory_docs:c03",
+        "memory_docs:c04", // global with external_sync taint stays
+        "user_profile:f-normal",
+        "graph_namespace:4",
+        "graph_global:1",
+        "mem_tree_chunks:chat:conversations:agent",
+        "mem_tree_chunks:document:mem_src:folder",
+    ];
+    let mut got: Vec<&str> = ids.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    got.sort_unstable();
+    assert_eq!(got, expected);
+    let counts = ws.counts().unwrap();
+    assert_eq!(counts, counted(&all(&ws)));
+    assert_eq!(counts.total(), expected.len() as u64);
+}
+
+#[test]
+fn skipping_connector_syncs_keeps_resumption_exact() {
+    let dir = with_connector_syncs();
+    let ws = LegacyWorkspace::open(dir.path())
+        .unwrap()
+        .skip_connector_syncs(true);
+    let all_items = all(&ws);
+    for (n, imported) in all_items.iter().enumerate() {
+        let rest: Vec<String> = ws
+            .items_from(&imported.checkpoint)
+            .map(|i| source_id(&i.unwrap().item))
+            .collect();
+        let want: Vec<String> = all_items[n + 1..]
+            .iter()
+            .map(|i| source_id(&i.item))
+            .collect();
+        assert_eq!(rest, want);
+    }
+    let small: Vec<String> = ws
+        .items()
+        .with_page_size(1)
+        .map(|i| source_id(&i.unwrap().item))
+        .collect();
+    assert_eq!(small, legacy_ids(&ws));
+}
+
+#[test]
+fn the_owner_rule_needs_the_owner_column() {
+    // A chunk store without `owner` cannot match on it; the other rules hold.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("memory_tree/content")).unwrap();
+    let chunks = rusqlite::Connection::open(dir.path().join("memory_tree/chunks.db")).unwrap();
+    chunks
+        .execute_batch(
+            "CREATE TABLE mem_tree_chunks (id TEXT PRIMARY KEY, source_kind TEXT NOT NULL,
+               source_id TEXT NOT NULL, timestamp_ms INTEGER NOT NULL, tags_json TEXT NOT NULL,
+               content TEXT NOT NULL, seq_in_source INTEGER NOT NULL);
+             INSERT INTO mem_tree_chunks VALUES ('a', 'document', 'x-sync', 1, '[]', 'one', 0);
+             INSERT INTO mem_tree_chunks VALUES ('b', 'email', 'y', 1, '[]', 'two', 0);",
+        )
+        .unwrap();
+    drop(chunks);
+    let ws = LegacyWorkspace::open(dir.path())
+        .unwrap()
+        .skip_connector_syncs(true);
+    assert_eq!(legacy_ids(&ws), ["mem_tree_chunks:document:x-sync"]);
+    assert_eq!(ws.counts().unwrap().chunks, 1);
+}

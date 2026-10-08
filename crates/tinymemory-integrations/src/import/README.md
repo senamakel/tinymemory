@@ -18,6 +18,7 @@ Architecture overview:
 | `LegacyWorkspace::open(path)` | Detects a v1 store or refuses with a typed error. |
 | `LegacyWorkspace::store_suffixes(path)` / `open_store(path, suffix)` / `store_suffix()` | Lists and opens the per-profile stores (`memory-1`, `memory_tree-1`, …). |
 | `LegacyWorkspace::counts()` | `LegacyCounts` per section, exactly what `items()` yields: one aggregate query per `memory.db` section, the chunk store through the chunk reader, no item decoded; `total()`, `is_empty()`. Non-exhaustive. |
+| `LegacyWorkspace::skip_connector_syncs(bool)` | Opt in to leaving out everything v1 synced from connectors (Composio and the connector path); see [Connector syncs](#connector-syncs). Off by default. |
 | `LegacyWorkspace::has_memory_db()` / `has_chunks()` | Which of the two v1 databases the workspace has. |
 | `LegacyWorkspace::items()` / `items_from(&Checkpoint)` | Streams `Result<ImportedItem>` from the start or after a checkpoint. |
 | `Items::with_page_size(n)` | Keys fetched per query (default `DEFAULT_PAGE_SIZE`, 256). Does not affect output. |
@@ -44,7 +45,7 @@ the reason. Columns that later v1 migrations added are probed
 with `pragma_table_info` and used when present: `memory_docs.logical_namespace`,
 `memory_docs.taint`,
 `episodic_log.tool_calls_json`, `user_profile.state` / `user_state` / `class`
-/ `evidence_refs_json`, and `mem_tree_chunks.content_path`.
+/ `evidence_refs_json`, `mem_tree_chunks.content_path` and `mem_tree_chunks.owner`.
 
 Beside a `memory.db`, `memory_tree/chunks.db` is optional: if it is absent,
 not SQLite, or has no usable `mem_tree_chunks` table, the chunk section is
@@ -57,7 +58,8 @@ migration must not report itself complete without it.
 there is anything to import and show progress against a total. Every section
 counts with the very predicate its scan filters by (a SQL function over Rust's
 `str::trim`, and for the chunk store the chunk reader itself, which reads
-bodies from their files), so the counts are exactly what `items()` yields.
+bodies from their files), so the counts are exactly what `items()` yields,
+with or without `skip_connector_syncs`.
 
 ### Per-profile stores
 
@@ -134,7 +136,8 @@ Chunks of one source are ordered by `(seq_in_source, id)`. A chunk's text is
 the file `memory_tree/content/<content_path>` when the column is set, the path
 is a plain relative path, and the file exists; otherwise the stored preview.
 A `chat` source becomes a conversation of one `User` turn per chunk (chat
-chunks are transcripts of host channels, whose speakers are people), with
+chunks are transcripts of host channels, whose speakers are people, and, from
+Composio's Slack sync, channel messages under `slack:{conn}`), with
 `thread_id` = `source_id` and `turns` = `0..=n-1`. Every other kind becomes a
 document whose body is the chunks joined by blank lines. Tags are the union of
 the chunks' `tags_json` plus `source_kind:<kind>`; `observed_at` is the latest
@@ -230,6 +233,25 @@ whole trimmed text, tagged `goals` or `persona`, observed at the file's
 modification time (none when the file system cannot report one). A missing file is skipped; one that cannot be read, or is
 not UTF-8, is `Error::Io`. At most 256 KiB of a file is read: a longer one is
 cut there, at a character boundary, and also tagged `truncated`.
+
+## Connector syncs
+
+v1 synced outside services (Gmail, Slack, Notion, Linear, GitHub, ClickUp, ...)
+into its stores, through Composio and the older connector path. Those
+connectors re-sync, so a host can leave them out with
+`LegacyWorkspace::skip_connector_syncs(true)` (default `false`, which imports
+everything). The skipped rows yield no item, so the checkpoint still advances
+over them, and `counts()` excludes exactly the same rows. Conversations,
+folder and file memory sources (`mem_src:*`), `conversations:agent`, meetings,
+`global`, learnings, events, lessons, goals and persona files are never
+skipped. The rules:
+
+| Section | Skipped when |
+| --- | --- |
+| documents (`memory_docs`) | the logical namespace starts with `skill-` (Composio `SkillDoc` sync, `skill-{toolkit}`) or `source:` (connector path, `source:{toolkit}:{conn}`, stored as `source_...`; the resolver maps it back). Taint is not consulted: v1 also marked the agent's own `global` and flow notes `external_sync`. |
+| chunks | `source_kind = 'email'`; or `source_id` starts with a toolkit prefix in `CONNECTOR_TOOLKIT_PREFIXES` (`gmail:`, `slack:`, `notion:`, `linear:`, `github:`, `clickup:`); or the store has an `owner` column and any chunk of the source has `owner LIKE '%-sync:%'` (`{toolkit}-sync:{conn}`) |
+| profile | `facet_id` starts with `skill-` (Composio identity facets `skill-{toolkit}-{conn}-{kind}`) |
+| graph | `graph_namespace.namespace` starts with `skill-`, `source:` or `source_`; `graph_global` is unaffected |
 
 ## Ordering and resumption
 

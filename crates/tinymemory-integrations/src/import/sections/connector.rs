@@ -11,7 +11,8 @@
 //!   `source:{toolkit}:{conn}`). Taint is deliberately not consulted: v1 also
 //!   marked the agent's own `global` and flow notes `external_sync`.
 //! - chunks: see [`chunk_source_by_identity`] and [`OWNER_SYNC_PATTERN`].
-//! - `user_profile`: `facet_id` starting `skill-` ([`PROFILE_SKILL_PREFIX`]).
+//! - `user_profile`: `facet_id` starting `skill-` (Composio identity facets
+//!   `skill-{toolkit}-{conn}-{kind}`).
 //! - `graph_namespace`: namespace starting `skill-`, `source:` or `source_`.
 
 /// Connector toolkits whose chunk `source_id` is `{toolkit}:{conn}[:{item}]`
@@ -27,10 +28,6 @@ pub(crate) const EMAIL_SOURCE_KIND: &str = "email";
 /// SQL `LIKE` pattern for a chunk `owner` written by a connector
 /// (`{toolkit}-sync:{conn}`).
 pub(crate) const OWNER_SYNC_PATTERN: &str = "%-sync:%";
-
-/// Prefix of a `user_profile.facet_id` written by Composio identity sync
-/// (`skill-{toolkit}-{conn}-{kind}`).
-pub(crate) const PROFILE_SKILL_PREFIX: &str = "skill-";
 
 /// Whether a `memory_docs` logical namespace is a connector sync.
 pub(crate) fn is_connector_namespace(logical: &str) -> bool {
@@ -53,7 +50,7 @@ pub(crate) const GRAPH_NAMESPACE_KEPT: &str = "NOT (substr(COALESCE(namespace, '
      OR substr(COALESCE(namespace, ''), 1, 7) = 'source_')";
 
 /// SQL condition true for a `user_profile` row that is NOT a Composio
-/// identity facet.
+/// identity facet (`facet_id` starting `skill-`).
 pub(crate) const PROFILE_KEPT: &str = "substr(facet_id, 1, 6) != 'skill-'";
 
 #[cfg(test)]

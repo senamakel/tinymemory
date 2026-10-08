@@ -24,8 +24,3 @@ fn chunk_identity() {
     assert!(!chunk_source_by_identity("chat", "conversations:agent"));
     assert!(!chunk_source_by_identity("document", "slackish:x"));
 }
-
-#[test]
-fn profile_prefix_matches_constant() {
-    assert!(PROFILE_KEPT.contains(PROFILE_SKILL_PREFIX));
-}
