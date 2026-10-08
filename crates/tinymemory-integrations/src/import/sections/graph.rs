@@ -49,6 +49,16 @@ impl Table {
     }
 }
 
+/// The `AND …` filter dropping connector-synced namespaces, shared by `page`
+/// and `count`. `graph_global` has no namespace and is never filtered.
+fn connector_filter(ws: &LegacyWorkspace, table: Table) -> String {
+    if ws.skip_connector_syncs && table == Table::Namespace {
+        format!(" AND {}", super::connector::GRAPH_NAMESPACE_KEPT)
+    } else {
+        String::new()
+    }
+}
+
 /// The next page of `table`'s relations after the row `after`.
 pub(super) fn page(
     ws: &LegacyWorkspace,
@@ -65,10 +75,11 @@ pub(super) fn page(
     };
     let sql = format!(
         "SELECT rowid, subject, predicate, object, updated_at, {namespace} FROM {} \
-         WHERE (?1 IS NULL OR rowid > ?1) AND {} AND {} ORDER BY rowid LIMIT ?2",
+         WHERE (?1 IS NULL OR rowid > ?1) AND {} AND {}{} ORDER BY rowid LIMIT ?2",
         table.name(),
         has_text("subject"),
-        has_text("object")
+        has_text("object"),
+        connector_filter(ws, table)
     );
     let mut stmt = memory.prepare(&sql)?;
     let rows = stmt.query_map(params![after, sql_limit(limit)], |row| {
@@ -118,10 +129,11 @@ pub(super) fn count(ws: &LegacyWorkspace, table: Table) -> Result<u64> {
         return Ok(0);
     };
     let sql = format!(
-        "SELECT COUNT(*) FROM {} WHERE {} AND {}",
+        "SELECT COUNT(*) FROM {} WHERE {} AND {}{}",
         table.name(),
         has_text("subject"),
-        has_text("object")
+        has_text("object"),
+        connector_filter(ws, table)
     );
     Ok(count_of(memory.query_row(&sql, [], |row| row.get(0))?))
 }

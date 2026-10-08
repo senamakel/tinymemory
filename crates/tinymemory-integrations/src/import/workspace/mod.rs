@@ -49,6 +49,9 @@ pub struct LegacyWorkspace {
     pub(crate) schema: MemorySchema,
     /// `memory_tree/chunks.db`, when present and usable.
     pub(crate) chunks: Option<ChunkStore>,
+    /// Whether rows synced from connectors are left out; see
+    /// [`Self::skip_connector_syncs`].
+    pub(crate) skip_connector_syncs: bool,
 }
 
 impl LegacyWorkspace {
@@ -146,7 +149,21 @@ impl LegacyWorkspace {
             memory,
             schema,
             chunks,
+            skip_connector_syncs: false,
         })
+    }
+
+    /// Leaves out everything v1 synced from connectors (Composio and the
+    /// connector path: Gmail, Slack, Notion, Linear, GitHub, ClickUp, ...):
+    /// `memory_docs` in `skill-*` / `source:*` namespaces, chunk sources of
+    /// kind `email`, with a connector toolkit prefix in `source_id`, or with a
+    /// `*-sync:*` owner, `skill-*` profile facets, and `skill-*` / `source:*`
+    /// / `source_*` graph namespaces. [`Self::counts`] excludes the same rows.
+    /// Off by default. See the module README for the exact rules.
+    #[must_use]
+    pub fn skip_connector_syncs(mut self, skip: bool) -> Self {
+        self.skip_connector_syncs = skip;
+        self
     }
 
     /// The suffixes of the per-profile v1 stores beside the main one in the
