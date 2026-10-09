@@ -17,6 +17,7 @@ use std::path::{Component, Path};
 use rusqlite::params;
 use tinymemory_api::{DocumentBody, Role, StoreItem, Turn, TurnRange};
 
+use super::connector;
 use super::{Mark, Scanned, import_meta, push_unique, sql_limit};
 use crate::import::checkpoint::ChunkCursor;
 use crate::import::convert;
@@ -59,8 +60,13 @@ pub(super) fn page(
     sources
         .into_iter()
         .map(|source| {
+            let item = if skipped(ws, store, &source)? {
+                None
+            } else {
+                source_item(ws, store, &source)?
+            };
             Ok(Scanned {
-                item: source_item(ws, store, &source)?,
+                item,
                 mark: Mark::Chunk(source),
             })
         })
@@ -87,11 +93,38 @@ pub(super) fn count(ws: &LegacyWorkspace) -> Result<u64> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut total = 0;
     for source in sources {
-        if !chunks(store, &source)?.is_empty() {
+        if !skipped(ws, store, &source)? && !chunks(store, &source)?.is_empty() {
             total = u64::saturating_add(total, 1);
         }
     }
     Ok(total)
+}
+
+/// Whether the workspace leaves this source out as a connector sync: its
+/// kind or id says so ([`connector::chunk_source_by_identity`]), or, when the
+/// store has an `owner` column, any of its chunks has an owner matching
+/// [`connector::OWNER_SYNC_PATTERN`]. The one test `page` and [`count`] share.
+fn skipped(ws: &LegacyWorkspace, store: &ChunkStore, source: &ChunkCursor) -> Result<bool> {
+    if !ws.skip_connector_syncs {
+        return Ok(false);
+    }
+    if connector::chunk_source_by_identity(&source.source_kind, &source.source_id) {
+        return Ok(true);
+    }
+    if !store.owner {
+        return Ok(false);
+    }
+    let by_owner = store.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mem_tree_chunks \
+         WHERE source_kind = ?1 AND source_id = ?2 AND owner LIKE ?3)",
+        params![
+            source.source_kind,
+            source.source_id,
+            connector::OWNER_SYNC_PATTERN
+        ],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(by_owner)
 }
 
 fn source_item(

@@ -43,6 +43,10 @@ pub(super) fn count(ws: &LegacyWorkspace) -> Result<u64> {
 /// columns this store has.
 fn live_filters(ws: &LegacyWorkspace) -> String {
     let mut filters = String::new();
+    if ws.skip_connector_syncs {
+        filters.push_str(" AND ");
+        filters.push_str(super::connector::PROFILE_KEPT);
+    }
     if ws.schema.profile_state {
         filters.push_str(" AND state IS NOT 'dropped'");
     }

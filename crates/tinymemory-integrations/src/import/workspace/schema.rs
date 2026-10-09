@@ -150,6 +150,8 @@ pub(crate) struct ChunkStore {
     pub(crate) content_dir: PathBuf,
     /// Whether `mem_tree_chunks.content_path` exists.
     pub(crate) content_path: bool,
+    /// Whether `mem_tree_chunks.owner` exists.
+    pub(crate) owner: bool,
 }
 
 impl ChunkStore {
@@ -172,6 +174,7 @@ impl ChunkStore {
         }
         Ok(Some(Self {
             content_path: present.contains("content_path"),
+            owner: present.contains("owner"),
             content_dir: tree.join("content"),
             conn,
         }))

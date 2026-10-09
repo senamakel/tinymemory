@@ -83,6 +83,7 @@ pub(super) fn documents(
         .map(|row| {
             let logical = logical_namespace(&row);
             let item = match classify(&logical) {
+                RowClass::Document if skipped(ws, &logical) => None,
                 RowClass::Document => document(ws, &row, logical),
                 _ => None,
             };
@@ -144,7 +145,9 @@ pub(super) fn count(ws: &LegacyWorkspace, learnings: bool) -> Result<u64> {
     let mut total = 0;
     for group in groups {
         let (namespace, logical_namespace, rows) = group?;
-        let wanted = match classify(&resolve_logical(&namespace, logical_namespace.as_deref())) {
+        let logical = resolve_logical(&namespace, logical_namespace.as_deref());
+        let wanted = match classify(&logical) {
+            RowClass::Document if skipped(ws, &logical) => false,
             RowClass::Document => !learnings,
             RowClass::Learning(_) | RowClass::Global => learnings,
             RowClass::Event => false,
@@ -204,6 +207,12 @@ fn mark_taint(row: &DocRow, tags: &mut Vec<String>) {
     if row.external {
         push_unique(tags, EXTERNAL_SYNC_TAG.to_string());
     }
+}
+
+/// Whether the workspace leaves out a row of this logical namespace as a
+/// connector sync; the one test the documents scan and [`count`] share.
+fn skipped(ws: &LegacyWorkspace, logical: &str) -> bool {
+    ws.skip_connector_syncs && super::connector::is_connector_namespace(logical)
 }
 
 fn logical_namespace(row: &DocRow) -> String {

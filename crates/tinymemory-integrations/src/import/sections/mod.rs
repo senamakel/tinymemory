@@ -8,6 +8,7 @@
 //! rows never stalls the iterator.
 
 mod chunks;
+pub(crate) mod connector;
 mod episodic;
 mod events;
 mod files;
