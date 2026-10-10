@@ -34,9 +34,9 @@ hits; no scored probe moved the other way. The mock paraphrase
 `team_handoff/billed-twice` still misses. With real embeddings it reaches the
 pack, but the model slice remains only seven questions and one fresh run per
 setting. One baseline model answer graded correct despite an empty pack, so
-model scores must be read beside pack hits. CortexDB model cost was $0.022
-with team recall off and $0.021 with it on; that difference is noise at this
-sample size.
+model scores must be read beside pack hits. In the final rerun, CortexDB
+model cost was $0.0196 with team recall off and $0.0206 with it on; that
+difference is noise at this sample size.
 
 The source references below use OpenHuman commit `cf16716f4f` for the hook
 behavior, [OpenHuman PR #7346](https://github.com/tinyhumansai/openhuman/pull/7346)
