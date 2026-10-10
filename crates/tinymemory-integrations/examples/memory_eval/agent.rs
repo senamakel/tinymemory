@@ -23,7 +23,7 @@ use tinymemory_api::{Error, ToolCallRef};
 use tinymemory_tools::{AgentMemory, BackgroundJob, PostTurn, PreTurn, TurnContext};
 
 /// OpenHuman's default deadline for the pack before a model turn.
-pub(crate) const PRE_TURN_TIMEOUT: StdDuration = StdDuration::from_millis(1_500);
+pub(crate) const PRE_TURN_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
 /// The host selects one lifecycle hook from its recall configuration and
 /// whether the thread is resuming after compaction.

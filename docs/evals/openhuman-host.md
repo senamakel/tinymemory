@@ -12,7 +12,7 @@ them when the host's defaults or hook behavior changes.
 | Behavior | Eval mirror | OpenHuman source |
 | --- | --- | --- |
 | 1200-token budget, 8 learnings, 6 brain, 6 history, 0 team, beliefs every 10 turns | `main.rs`, OpenHuman policy | `crates/openhuman-core/src/config/schema/memory.rs:278-336` |
-| Plain `pre_turn` by default, resumed hook after compaction, optional dated path with `--date-hint`, empty pack after 1500 ms | `agent.rs`, `HostHook` | `crates/openhuman-core/src/config/schema/memory.rs` and `crates/openhuman-core/src/memory/lifecycle/hooks.rs` |
+| Plain `pre_turn` by default, resumed hook after compaction, optional dated path with `--date-hint`, empty pack after 5000 ms | `agent.rs`, `HostHook` | `crates/openhuman-core/src/config/schema/memory.rs` and `crates/openhuman-core/src/memory/lifecycle/hooks.rs` |
 | Timed-out task continues in the background and can still log the turn | `agent.rs`, `ScriptedAgent::flush` | `crates/openhuman-core/src/memory/lifecycle/hooks.rs:190-225` |
 | Identical pending belief builds run once | `main.rs`, `coalesce_builds` | `crates/openhuman-core/src/memory/lifecycle/jobs.rs`, `enqueue` |
 | User and reply indices `2n` and `2n+1` | `agent.rs`, `ScriptedAgent::user` | `crates/openhuman-core/src/memory/lifecycle/hooks.rs:245-255,414-435` |
@@ -71,6 +71,10 @@ one `OUT_DIR`; the runner tracks the key's cumulative usage and reserves
 `COST_PER_RUN` (default $0.50) before starting each run.
 
 ## Measured runs, 2026-10-10
+
+The tables below were collected with OpenHuman's former 1500 ms default.
+The current host and this mirror use 5000 ms; fresh runs must be compared
+with their recorded deadline rather than treating old timeout rates as current.
 
 | Run | Scope | Recall / synthesis pack hit | Synthesis model answer | Pre-turn p95 | Timeout rate | CortexDB cost |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -194,3 +198,23 @@ missed at 1.37 seconds. Both probes in repeats 2 and 3 reached OpenHuman's
 ranked retrieval, and even direct-fetch readiness did not guarantee that a
 host probe would complete within its deadline. The per-run model cost includes
 background extraction and enrichment and is not a per-query price.
+
+## Accuracy follow-up
+
+On the same mock CortexDB fixture, with `openai/gpt-4.1-mini` answering from
+the pack, the `coding_session,task_drift` slice kept all 6/6 pack hits per
+phase. Model answers rose from 5/6 to 6/6 in recall and from 5/6 to 6/6 in
+synthesis after agent-history turns were presented newest first within each
+thread. The corrected answer names `test_does_not_repeat_unknown_write` as the
+test that exposed the unsafe retry. Previously the model chose the older
+`test_retries_refused_connection` result. This is a six-question slice, not a
+full-suite accuracy estimate.
+
+A fresh live 100-document scale run at the 5000 ms deadline returned its
+lexical answer in 2.08 seconds and its paraphrase miss in 1.78 seconds, with
+no timeouts. The correct document ranked first for the lexical question but
+23rd for the paraphrase in a direct 100-event CortexDB recall. This run shows
+that the longer deadline removes the timeout for these two probes, while the
+paraphrase still needs a retrieval-quality improvement. It is a fresh
+collection and cannot be treated as a paired timeout comparison with the
+1500 ms runs above.

@@ -74,6 +74,43 @@ async fn pre_turn_logs_the_turn_and_recalls_without_it() {
 }
 
 #[tokio::test]
+async fn ranked_history_presents_newer_tool_outcome_before_earlier_failure() {
+    let engine = Arc::new(ReferenceEngine::new());
+    let coder = memory(&engine, "coder-42");
+    let at = chrono::DateTime::parse_from_rfc3339("2026-09-01T09:01:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut first = PostTurn::new(
+        "retry-fix",
+        1,
+        "Noted. Tools: - read_file → src/client/retry.rs: retry_on_connect=false - run_tests → FAILED test_retries_refused_connection at retry_tests.rs:81",
+    );
+    first.at = Some(at);
+    coder.post_turn(first).await.unwrap();
+    let mut second = PostTurn::new(
+        "retry-fix",
+        3,
+        "Noted. Tools: - git_diff → retry_on_connect=true caused duplicate writes after ambiguous timeout - run_tests → FAILED test_does_not_repeat_unknown_write",
+    );
+    second.at = Some(at + chrono::Duration::minutes(2));
+    coder.post_turn(second).await.unwrap();
+
+    let pack = coder
+        .recall("Which test exposed the unsafe retry?")
+        .await
+        .unwrap();
+    let newer = pack
+        .markdown
+        .find("test_does_not_repeat_unknown_write")
+        .unwrap();
+    let older = pack
+        .markdown
+        .find("test_retries_refused_connection")
+        .unwrap();
+    assert!(newer < older, "{}", pack.markdown);
+}
+
+#[tokio::test]
 async fn the_thread_in_the_prompt_is_left_out_until_it_is_compacted_away() {
     let engine = with_brain().await;
     let support = memory(&engine, "support-01");
