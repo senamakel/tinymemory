@@ -66,6 +66,17 @@ async fn a_string_prefix_backend_lists_no_sibling_on_either_wire() {
                 .any(|path| path.starts_with("app:tinymemory/user:ann/")),
             "{listed:?}"
         );
+        // The node's own scope is listed beside its descendants.
+        assert!(
+            listed.contains(&"app:tinymemory/user:ann/app:learnings".to_string()),
+            "{listed:?}"
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|path| path.starts_with("app:tinymemory/user:ann/agent:scout/")),
+            "{listed:?}"
+        );
         assert!(
             listed.iter().all(|path| !path.contains("user:anna")),
             "{listed:?}"

@@ -274,7 +274,10 @@ Needed only for a subtree reach or no reach (see
 [scope layout](cortex-wire.md#scope-layout)). The engine asks the scopes
 route (`v1/scopes/list` or `memory/scopes`) with `prefix` set to
 `app:tinymemory`, or to the reach's own node path when it is not the root, and
-`limit=1000`. Each returned path is parsed with `parse_scope`; paths that are
+`limit=1000`. The prefix is the bare node path (both wires refuse a
+separator-terminated one); the reader keeps only paths at or below it on whole
+segments, so a sibling such as `user:anna` is dropped from a `user:ann`
+listing. Each returned path is parsed with `parse_scope`; paths that are
 not TinyMemory kind scopes are skipped, and those whose namespace the reach
 admits and whose kind the filter admits are added to the known nodes. A `404`
 from the scopes route yields no extra scopes. Discovery runs once per call.
