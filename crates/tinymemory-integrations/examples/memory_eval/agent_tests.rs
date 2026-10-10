@@ -1,6 +1,11 @@
 //! Regression coverage for the OpenHuman turn mirror.
 
 use super::*;
+
+#[test]
+fn openhuman_pre_turn_deadline_is_five_seconds() {
+    assert_eq!(PRE_TURN_TIMEOUT, StdDuration::from_secs(5));
+}
 use std::sync::Arc;
 use tinymemory_api::conformance::ReferenceEngine;
 use tinymemory_api::{LearningKind, ListRequest, MemoryEngine, MemoryMeta, StoreItem};

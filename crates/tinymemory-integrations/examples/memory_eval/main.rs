@@ -45,7 +45,7 @@
 //! - `--llm`: also have a model answer every probe from its pack (see
 //!   `llm`).
 //! - `--host openhuman`: run scripted turns through OpenHuman's dated
-//!   pre-turn hook with its 1500 ms deadline, policy and logged tool results.
+//!   pre-turn hook with its 5000 ms deadline, policy and logged tool results.
 //! - `--loop-guard`: replay a JSON-scripted 500-turn thread and inspect all
 //!   stored items for an injected `<memory-context>` tag.
 //!
@@ -469,6 +469,7 @@ async fn main() -> Result<(), Error> {
             "server": server,
             "engine": engine.descriptor().id,
             "host": args.host,
+            "pre_turn_timeout_ms": PRE_TURN_TIMEOUT.as_millis() as u64,
             "date_hint": args.date_hint,
             "scale_events": args.scale_events,
             "scale_position": args.scale_position,

@@ -6,6 +6,8 @@
 //! [`section`] reads; [`settle`] then applies the request's exclusions and
 //! the items earlier sections already list, in section order, so an item is
 //! listed once — in its highest-priority section.
+//! In the agent-history section, selected turns from the same thread are
+//! shown newest first while the engine's ordering across threads is kept.
 //!
 //! **Beliefs.** To the reader a belief the engine built is a learning like
 //! any other, so a pack with a learnings section (a fetched or latest
@@ -490,12 +492,18 @@ pub(super) fn settle(
         Gathered::Hits { hits, .. } => hits,
     };
     let kinds = &section.filter.kinds;
-    let hits: Vec<Hit> = hits
+    let mut hits: Vec<Hit> = hits
         .into_iter()
         .filter(|hit| kinds.is_empty() || kinds.contains(&hit.kind))
         .filter(|hit| !request.excludes(hit) && !shown.contains(&hit.id))
         .take(section.limit)
         .collect();
+    if section.heading == crate::lifecycle::HISTORY_HEADING
+        && section.filter.kinds.as_slice() == [ItemKind::Conversation]
+        && matches!(section.query, SectionQuery::Fetch { .. })
+    {
+        newest_turns_first_within_thread(&mut hits);
+    }
     if hits.is_empty() {
         return Settled::Skipped(skipped_section(section, "empty".to_string()));
     }
@@ -527,3 +535,38 @@ pub(super) fn settle(
         },
     )
 }
+
+/// Keep the engine's order across threads, but make each selected thread's
+/// updates read newest first. A later tool outcome can supersede an earlier
+/// failure even when the earlier turn had a slightly better retrieval rank.
+fn newest_turns_first_within_thread(hits: &mut [Hit]) {
+    let mut handled = HashSet::new();
+    for index in 0..hits.len() {
+        let Some(thread) = hits[index].meta.thread_id.clone() else {
+            continue;
+        };
+        if !handled.insert(thread.clone()) {
+            continue;
+        }
+        let positions: Vec<usize> = (index..hits.len())
+            .filter(|&at| hits[at].meta.thread_id.as_deref() == Some(thread.as_str()))
+            .collect();
+        let mut turns: Vec<Hit> = positions.iter().map(|&at| hits[at].clone()).collect();
+        turns.sort_by(|left, right| {
+            right
+                .meta
+                .turns
+                .as_ref()
+                .map(|range| range.last)
+                .cmp(&left.meta.turns.as_ref().map(|range| range.last))
+                .then_with(|| right.meta.observed_at.cmp(&left.meta.observed_at))
+        });
+        for (at, hit) in positions.into_iter().zip(turns) {
+            hits[at] = hit;
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "gather_tests.rs"]
+mod tests;
