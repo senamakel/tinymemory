@@ -94,10 +94,12 @@ pub(crate) async fn forget(
                 .map(|hit| hit.id)
                 .collect();
             let skipped: Vec<ItemId> = ids.into_iter().filter(|id| !found.contains(id)).collect();
-            let report = if found.is_empty() {
-                ForgetReport::default()
-            } else {
-                engine.forget(ForgetTarget::Ids(found)).await?
+            // A scoped forget looks the ids up only inside the scope's reach,
+            // never across the whole tree.
+            let report = match (&scope.reach, found.is_empty()) {
+                (_, true) => ForgetReport::default(),
+                (Some(reach), false) => engine.forget_within(found, reach.clone()).await?,
+                (None, false) => engine.forget(ForgetTarget::Ids(found)).await?,
             };
             Ok(render::forget(&report, &skipped))
         }
