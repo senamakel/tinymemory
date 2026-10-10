@@ -93,7 +93,7 @@ pub async fn holistic_recall(
     engine: &dyn MemoryEngine,
     request: &HolisticRecall,
 ) -> Result<ContextPack> {
-    run(engine, request, None, None).await
+    run(engine, request, None, None, None).await
 }
 
 /// [`holistic_recall`] for a question whose date is still being worked out.
@@ -114,29 +114,30 @@ pub async fn holistic_recall_dated(
     request: &HolisticRecall,
     hint: impl Future<Output = Option<TimeHint>> + Send,
 ) -> Result<ContextPack> {
-    run(engine, request, None, Some(Box::pin(hint))).await
+    run(engine, request, None, Some(Box::pin(hint)), None).await
 }
 
 /// A date that may arrive while the sections are read.
 pub(crate) type LateHint<'a> = Pin<Box<dyn Future<Output = Option<TimeHint>> + Send + 'a>>;
 
-/// [`holistic_recall`], optionally with `context.md` frontmatter and a late
-/// date.
+/// [`holistic_recall`], optionally with `context.md` frontmatter, a late
+/// date, and one lifecycle team section that excludes its current agent.
 pub(crate) async fn run(
     engine: &dyn MemoryEngine,
     request: &HolisticRecall,
     frontmatter: Option<Frontmatter<'_>>,
     late: Option<LateHint<'_>>,
+    excluded_team: Option<(usize, &str)>,
 ) -> Result<ContextPack> {
     request.validate()?;
     let beliefs = gather::belief_budget(request);
     let dated = late.is_some() || request.refers_to.is_some();
-    let reads = join_all(
-        request
-            .sections
-            .iter()
-            .map(|section| gather::section(engine, request, section, beliefs, dated)),
-    );
+    let reads = join_all(request.sections.iter().enumerate().map(|(index, section)| {
+        let excluded_agent = excluded_team
+            .filter(|(team, _)| *team == index)
+            .map(|(_, agent)| agent);
+        gather::section(engine, request, section, beliefs, dated, excluded_agent)
+    }));
     let (mut gathered, late) = match late {
         Some(late) => join(reads, late).await,
         None => (reads.await, None),
@@ -167,8 +168,11 @@ pub(crate) async fn run(
     let mut rendered_from = Vec::new();
     let mut skipped = Vec::new();
     let mut shown = HashSet::new();
-    for (section, outcome) in request.sections.iter().zip(gathered) {
-        match gather::settle(request, section, outcome, &mut shown) {
+    for (index, (section, outcome)) in request.sections.iter().zip(gathered).enumerate() {
+        let excluded_agent = excluded_team
+            .filter(|(team, _)| *team == index)
+            .map(|(_, agent)| agent);
+        match gather::settle(request, section, outcome, excluded_agent, &mut shown) {
             Settled::Filled(rendered, hits) => {
                 rendered_from.push(rendered);
                 sections.push(hits);

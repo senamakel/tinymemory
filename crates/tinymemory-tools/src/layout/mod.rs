@@ -31,7 +31,8 @@
 //! **Pooled conversations.** A host whose agents share one chat history
 //! ([`MemoryLayout::with_pooled_conversations`]) keeps every agent's turns at
 //! one node (`ws:main`), each turn labelled with its agent id: an agent's
-//! history is that node filtered to its id, and the team's is the whole node.
+//! history is that node filtered to its id, and the team section reads it
+//! excluding that id. The host's root still bounds both reads.
 //!
 //! **Core scopes** share memory beyond one layout. A host that nests every
 //! tenant under one company node (`ws:acme/team:hive`) can name an ancestor

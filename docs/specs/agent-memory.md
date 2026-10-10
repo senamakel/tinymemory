@@ -179,9 +179,13 @@ skipped, engine }`.
   section per core scope ([core-scopes.md](core-scopes.md); none by default),
   Brain (all documents, reading at most `BRAIN_SCOPES_PER_TURN` (4) scopes:
   those the query names, then the most recently written), this agent's
-  history, and team conversations (every agent; none in a layout that pools
-  conversations, where they are the history's node). A zero limit in
-  `RecallPolicy` leaves a section out.
+  history, and team conversations (other agents under the same layout root).
+  In a pooled layout both conversation sections read the same chat node:
+  history selects this agent's id, while team excludes it. The team limit
+  counts selected turns, not agents or threads. Excluded own turns cannot
+  exhaust a fixed retrieval page cap before eligible team turns are reached.
+  A zero limit in `RecallPolicy` leaves a section out. Team recall never
+  reaches another person's root.
 - **`pre_turn` never fails on an engine error.** A failed log is reported in
   `TurnContext::log_error` and the pack is still returned.
 - **`post_turn` reports belief builds.** It returns a `BuildBeliefs` job for

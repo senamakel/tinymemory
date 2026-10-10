@@ -85,7 +85,7 @@ impl ContextCompiler {
             engine: engine_id,
             generated_at,
         };
-        let pack = recall::run(engine, &holistic(spec), Some(frontmatter), None)
+        let pack = recall::run(engine, &holistic(spec), Some(frontmatter), None, None)
             .await
             .map_err(|error| Error::InvalidSpec(error.to_string()))?;
         log::debug!(

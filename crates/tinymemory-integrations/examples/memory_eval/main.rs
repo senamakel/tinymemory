@@ -46,6 +46,8 @@
 //!   `llm`).
 //! - `--host openhuman`: run scripted turns through OpenHuman's dated
 //!   pre-turn hook with its 5000 ms deadline, policy and logged tool results.
+//! - `--layout v3`: use CortexDB's per-person scope tree and pooled chats.
+//! - `--team-limit <n>`: override the host's team-conversation budget.
 //! - `--loop-guard`: replay a JSON-scripted 500-turn thread and inspect all
 //!   stored items for an injected `<memory-context>` tag.
 //!
@@ -133,6 +135,8 @@ struct Args {
     label: String,
     llm: bool,
     host: String,
+    layout: String,
+    team_limit: Option<usize>,
     date_hint: bool,
     scale_events: Option<usize>,
     scale_position: String,
@@ -156,6 +160,8 @@ fn args() -> Result<Args, Error> {
         label: String::new(),
         llm: false,
         host: "scripted".into(),
+        layout: "legacy".into(),
+        team_limit: None,
         date_hint: false,
         scale_events: None,
         scale_position: "middle".into(),
@@ -176,6 +182,8 @@ fn args() -> Result<Args, Error> {
             "--label" => parsed.label = value()?,
             "--llm" => parsed.llm = true,
             "--host" => parsed.host = value()?,
+            "--layout" => parsed.layout = value()?,
+            "--team-limit" => parsed.team_limit = Some(value()?.parse()?),
             "--date-hint" => parsed.date_hint = true,
             "--scale-events" => parsed.scale_events = Some(value()?.parse()?),
             "--scale-position" => parsed.scale_position = value()?,
@@ -189,6 +197,9 @@ fn args() -> Result<Args, Error> {
     }
     if !matches!(parsed.host.as_str(), "scripted" | "openhuman") {
         return Err(format!("unknown host {}", parsed.host).into());
+    }
+    if !matches!(parsed.layout.as_str(), "legacy" | "v3") {
+        return Err(format!("unknown layout {}", parsed.layout).into());
     }
     if parsed.loop_guard && parsed.host != "openhuman" {
         return Err("--loop-guard requires --host openhuman".into());
@@ -300,23 +311,28 @@ async fn main() -> Result<(), Error> {
     let (engine, inspector): (Arc<dyn MemoryEngine>, Option<Inspector>) = match args.engine.as_str()
     {
         "reference" => (Arc::new(ReferenceEngine::new()), None),
-        "cortex" if !url.is_empty() => (
-            Arc::new(CortexEngine::direct(&url, CortexCredential::api_key(&key))?),
-            Some(Inspector::new(&url, &key)),
-        ),
+        "cortex" if !url.is_empty() => {
+            let engine = CortexEngine::direct(&url, CortexCredential::api_key(&key))?;
+            let engine = if args.layout == "v3" {
+                engine.with_scope_root(&format!("org:eval-{}", std::process::id()), None)?
+            } else {
+                engine
+            };
+            (Arc::new(engine), Some(Inspector::new(&url, &key)))
+        }
         "cortex" => return Err("--engine cortex needs CORTEX_DB_URL".into()),
         "tinyhumans" => {
             let base = std::env::var("TINYHUMANS_API_URL")
                 .unwrap_or_else(|_| TINYHUMANS_API_ENDPOINT.to_string());
             let token = std::env::var("TINYHUMANS_API_KEY")
                 .map_err(|_| "--engine tinyhumans needs TINYHUMANS_API_KEY")?;
-            (
-                Arc::new(CortexEngine::tinyhumans(
-                    &base,
-                    Arc::new(StaticBearer::new(token)),
-                )?),
-                None,
-            )
+            let engine = CortexEngine::tinyhumans(&base, Arc::new(StaticBearer::new(token)))?;
+            let engine = if args.layout == "v3" {
+                engine.with_tenant_root()?
+            } else {
+                engine
+            };
+            (Arc::new(engine), None)
         }
         other => return Err(format!("unknown engine {other}").into()),
     };
@@ -342,7 +358,7 @@ async fn main() -> Result<(), Error> {
         llm.as_ref().map_or("none", |llm| llm.model.as_str()),
     );
 
-    let policy = if args.host == "openhuman" {
+    let mut policy = if args.host == "openhuman" {
         RecallPolicy {
             team_limit: 0,
             ..RecallPolicy::default()
@@ -353,6 +369,9 @@ async fn main() -> Result<(), Error> {
             ..RecallPolicy::default()
         }
     };
+    if let Some(team_limit) = args.team_limit {
+        policy.team_limit = team_limit;
+    }
     let eval = Eval {
         engine: engine.clone(),
         inspector,
@@ -362,6 +381,7 @@ async fn main() -> Result<(), Error> {
         enrich_wait,
         policy,
         openhuman: args.host == "openhuman",
+        pooled: args.layout == "v3",
         date_hint: args.date_hint,
         ranked_wait: args.ranked_wait,
     };
@@ -402,7 +422,7 @@ async fn main() -> Result<(), Error> {
     }
 
     let loop_guard = if args.loop_guard {
-        let report = loop_guard::run(engine.clone(), run, &eval.policy).await?;
+        let report = loop_guard::run(engine.clone(), run, &eval.policy, eval.pooled).await?;
         println!(
             "\n## Loop guard\n\n```json\n{}\n```",
             serde_json::to_string_pretty(&report)?
@@ -417,6 +437,7 @@ async fn main() -> Result<(), Error> {
             eval.inspector.as_ref(),
             run,
             args.expect_derived,
+            eval.pooled,
         )
         .await?;
         println!(
@@ -469,6 +490,8 @@ async fn main() -> Result<(), Error> {
             "server": server,
             "engine": engine.descriptor().id,
             "host": args.host,
+            "layout": args.layout,
+            "team_limit": eval.policy.team_limit,
             "pre_turn_timeout_ms": PRE_TURN_TIMEOUT.as_millis() as u64,
             "date_hint": args.date_hint,
             "scale_events": args.scale_events,
@@ -503,9 +526,14 @@ async fn main() -> Result<(), Error> {
 }
 
 /// The layout of `tenant` in `scenario` for this run.
-fn layout(run: u64, scenario: &str, tenant: &str) -> Result<MemoryLayout, Error> {
+fn layout(run: u64, scenario: &str, tenant: &str, pooled: bool) -> Result<MemoryLayout, Error> {
     let root = format!("project:eval-{run}-{}-{tenant}", scenario.replace('_', "-"));
-    Ok(MemoryLayout::new(root.parse()?)?)
+    let layout = MemoryLayout::new(root.parse()?)?;
+    if pooled {
+        Ok(layout.with_pooled_conversations(&"ws:main".parse()?)?)
+    } else {
+        Ok(layout)
+    }
 }
 
 /// The tenants a scenario touches.
@@ -556,6 +584,7 @@ struct Eval {
     enrich_wait: u64,
     policy: RecallPolicy,
     openhuman: bool,
+    pooled: bool,
     date_hint: bool,
     ranked_wait: u64,
 }
@@ -573,10 +602,12 @@ impl Eval {
             None => None,
         };
         let memory = |tenant: &str, agent: &str| -> Result<AgentMemory, Error> {
-            Ok(
-                AgentMemory::new(engine.clone(), layout(run, scenario.name, tenant)?, agent)?
-                    .with_policy(policy.clone()),
-            )
+            Ok(AgentMemory::new(
+                engine.clone(),
+                layout(run, scenario.name, tenant, self.pooled)?,
+                agent,
+            )?
+            .with_policy(policy.clone()))
         };
         let epoch = Utc
             .with_ymd_and_hms(2026, 9, 1, 9, 0, 0)
@@ -595,7 +626,7 @@ impl Eval {
                     needle_at,
                     seed,
                 } => {
-                    let node = layout(run, scenario.name, MAIN)?
+                    let node = layout(run, scenario.name, MAIN, self.pooled)?
                         .brain(&tinymemory_tools::BrainSource::Files)?;
                     let started = Instant::now();
                     for start in (0..*count).step_by(MAX_STORE_MANY) {
@@ -623,7 +654,10 @@ impl Eval {
                     title,
                     text,
                 } => {
-                    let brain = Brain::new(engine.clone(), layout(run, scenario.name, tenant)?);
+                    let brain = Brain::new(
+                        engine.clone(),
+                        layout(run, scenario.name, tenant, self.pooled)?,
+                    );
                     let started = Instant::now();
                     let ingested = brain
                         .ingest(BrainDocument::new(source.clone(), *text).titled(*title))
@@ -637,7 +671,7 @@ impl Eval {
                     text,
                     confidence,
                 } => {
-                    let layout = layout(run, scenario.name, MAIN)?;
+                    let layout = layout(run, scenario.name, MAIN, self.pooled)?;
                     let meta = MemoryMeta {
                         namespace: layout.learnings().clone(),
                         ..MemoryMeta::default()
@@ -689,7 +723,7 @@ impl Eval {
         let started = Instant::now();
         for (tenant, expected) in &writes {
             self.settle(
-                &layout(run, scenario.name, tenant)?,
+                &layout(run, scenario.name, tenant, self.pooled)?,
                 *expected,
                 settle_timeout(scenario.name),
             )
@@ -704,7 +738,7 @@ impl Eval {
                 // The unique owner name checks indexing without warming a
                 // scored question's exact query.
                 let mut req = FetchRequest::new("Mira Solis", FetchMode::Hybrid, 10);
-                req.filter = layout(run, scenario.name, MAIN)?.brain_filter(None);
+                req.filter = layout(run, scenario.name, MAIN, self.pooled)?.brain_filter(None);
                 let fetch_started = Instant::now();
                 let page = engine.fetch(req).await?;
                 timings.add("scale direct fetch", ms(fetch_started));
@@ -733,7 +767,7 @@ impl Eval {
             if std::env::var("CORTEX_DB_KEEP").is_err() {
                 engine
                     .forget(ForgetTarget::Filter(
-                        layout(run, scenario.name, MAIN)?.holistic_filter(),
+                        layout(run, scenario.name, MAIN, self.pooled)?.holistic_filter(),
                     ))
                     .await?;
             }
@@ -795,7 +829,9 @@ impl Eval {
             );
         }
         for tenant in tenants(scenario) {
-            let root = layout(run, scenario.name, tenant)?.root().clone();
+            let root = layout(run, scenario.name, tenant, self.pooled)?
+                .root()
+                .clone();
             jobs.push(BackgroundJob::BuildBeliefs {
                 request: ConsolidateRequest::new(Reach::subtree(root)),
             });
@@ -828,7 +864,7 @@ impl Eval {
         let questions = questions.join(" ");
         if let Some(inspector) = &self.inspector {
             for tenant in tenants(scenario) {
-                let layout = layout(run, scenario.name, tenant)?;
+                let layout = layout(run, scenario.name, tenant, self.pooled)?;
                 let node = layout.root().to_string();
                 let scopes = inspector.scopes(&node).await?;
                 for scope in &scopes {
@@ -877,7 +913,7 @@ impl Eval {
             for tenant in tenants(scenario) {
                 engine
                     .forget(ForgetTarget::Filter(
-                        layout(run, scenario.name, tenant)?.holistic_filter(),
+                        layout(run, scenario.name, tenant, self.pooled)?.holistic_filter(),
                     ))
                     .await?;
             }
@@ -948,7 +984,7 @@ impl Eval {
         let (engine, run, policy, llm) = (&self.engine, self.run, &self.policy, self.llm.as_ref());
         let memory = AgentMemory::new(
             engine.clone(),
-            layout(run, scenario.name, probe.tenant)?,
+            layout(run, scenario.name, probe.tenant, self.pooled)?,
             probe.agent,
         )?
         .with_policy(policy.clone());
@@ -1018,7 +1054,9 @@ impl Eval {
                 }
             }
             Via::ContextDoc { heading } => {
-                let root = layout(run, scenario.name, probe.tenant)?.root().clone();
+                let root = layout(run, scenario.name, probe.tenant, self.pooled)?
+                    .root()
+                    .clone();
                 let spec = ContextSpec {
                     briefs: vec![Brief::new(*heading, probe.question)],
                     reach: Some(Reach::subtree(root)),
@@ -1050,8 +1088,8 @@ impl Eval {
             _ => None,
         };
         if let Some((thread_id, index)) = logged_turn {
-            let mut filter =
-                layout(run, scenario.name, probe.tenant)?.conversations_filter(Some(probe.agent));
+            let mut filter = layout(run, scenario.name, probe.tenant, self.pooled)?
+                .conversations_filter(Some(probe.agent));
             filter.thread_id = Some(thread_id);
             filter.turns = Some(TurnRange {
                 first: index,

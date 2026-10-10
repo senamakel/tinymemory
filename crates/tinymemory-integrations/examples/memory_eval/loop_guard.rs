@@ -41,9 +41,10 @@ pub(crate) async fn run(
     engine: Arc<dyn MemoryEngine>,
     run: u64,
     policy: &RecallPolicy,
+    pooled: bool,
 ) -> Result<LoopGuardReport, Error> {
     let script: Script = serde_json::from_str(include_str!("data/loop_guard.json"))?;
-    let layout = layout(run, "loop_guard", "main")?;
+    let layout = layout(run, "loop_guard", "main", pooled)?;
     let meta = MemoryMeta {
         namespace: layout.learnings().clone(),
         ..MemoryMeta::default()

@@ -87,7 +87,6 @@ use crate::brain::Brain;
 use crate::layout::{CoreScope, MemoryLayout};
 use crate::recall::{
     ContextPack, HolisticRecall, LateHint, ScopeSection, SectionQuery, ThreadWindow,
-    holistic_recall,
 };
 use crate::tools::MemoryTools;
 
@@ -428,7 +427,13 @@ impl AgentMemory {
         request.exclude_thread = Some(window);
         let (logged, pack) = join(
             self.engine.store_with(item, WriteOptions::accepted()),
-            crate::recall::run(self.engine.as_ref(), &request, None, hint),
+            crate::recall::run(
+                self.engine.as_ref(),
+                &request,
+                None,
+                hint,
+                self.team_exclusion(&request),
+            ),
         )
         .await;
         let pack = pack?;
@@ -560,11 +565,6 @@ impl AgentMemory {
         }
     }
 
-    /// Learnings, each core scope, brain (at most
-    /// [`BRAIN_SCOPES_PER_TURN`] scopes), this agent's history, then the
-    /// team's, each filled by fetch; a zero limit leaves its section out. A
-    /// layout that pools conversations has no team section: it would read
-    /// the same node as the history.
     /// The thread's own latest turns, up to `limit`.
     fn thread_section(&self, thread_id: &str, limit: usize) -> ScopeSection {
         ScopeSection::latest(
@@ -577,6 +577,10 @@ impl AgentMemory {
         )
     }
 
+    /// Learnings, each core scope, brain (at most
+    /// [`BRAIN_SCOPES_PER_TURN`] scopes), this agent's history, then other
+    /// agents' turns. A zero limit leaves a section out. In a pooled layout,
+    /// history and team read the same node with complementary agent filters.
     fn standard_sections(&self) -> Vec<ScopeSection> {
         let policy = &self.policy;
         let learnings = (
@@ -589,11 +593,6 @@ impl AgentMemory {
             .core
             .iter()
             .map(|scope| (scope.heading.as_str(), scope.filter(), scope.limit, None));
-        let team_limit = if self.layout.pools_conversations() {
-            0
-        } else {
-            policy.team_limit
-        };
         let layout = [
             (
                 BRAIN_HEADING,
@@ -610,7 +609,7 @@ impl AgentMemory {
             (
                 TEAM_HEADING,
                 self.layout.conversations_filter(None),
-                team_limit,
+                policy.team_limit,
                 None,
             ),
         ];
@@ -636,12 +635,34 @@ impl AgentMemory {
         }
     }
 
+    /// The team section is the last section with its heading and shared
+    /// conversation filter; only lifecycle recall applies this exclusion.
+    fn team_exclusion<'a>(&'a self, request: &HolisticRecall) -> Option<(usize, &'a str)> {
+        if self.policy.team_limit == 0 {
+            return None;
+        }
+        let team_filter = self.layout.conversations_filter(None);
+        request
+            .sections
+            .iter()
+            .rposition(|section| section.heading == TEAM_HEADING && section.filter == team_filter)
+            .map(|index| (index, self.agent_id.as_str()))
+    }
+
     async fn read(
         &self,
         query: Option<String>,
         sections: Vec<ScopeSection>,
     ) -> Result<ContextPack> {
-        holistic_recall(self.engine.as_ref(), &self.request(query, sections)).await
+        let request = self.request(query, sections);
+        crate::recall::run(
+            self.engine.as_ref(),
+            &request,
+            None,
+            None,
+            self.team_exclusion(&request),
+        )
+        .await
     }
 
     /// One turn of `thread_id` as a one-turn conversation at this agent's
