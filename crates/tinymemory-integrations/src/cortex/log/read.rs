@@ -171,13 +171,27 @@ impl Log {
         // An empty prefix (the hosted tenant's own root) sends none: the
         // backend bounds an unprefixed listing to the caller's tenant, and
         // refuses an empty one.
-        let base = self.client.wire().path(Route::Scopes);
+        //
+        // Direct, a non-empty prefix is sent terminated by the separator
+        // (`user:ann/`), so a backend matching plain string prefixes cannot
+        // answer a sibling whose name merely starts the same way
+        // (`user:anna`). No scope is ever the bare node path (a scope always
+        // ends in a kind leaf), so nothing is lost. The hosted route's grammar
+        // is `type:id` segments and refuses a trailing separator, so it gets
+        // the bare node path and its answer is narrowed by the caller's
+        // namespace parse (`Reach::admits`).
+        let wire = self.client.wire();
+        let base = wire.path(Route::Scopes);
         let path = if prefix.is_empty() {
             format!("{base}?limit={SCOPES_LIMIT}")
         } else {
+            let terminated = match wire {
+                CortexWire::Direct if !prefix.ends_with('/') => format!("{prefix}/"),
+                _ => prefix.to_string(),
+            };
             format!(
                 "{base}?prefix={prefix}&limit={SCOPES_LIMIT}",
-                prefix = urlencode(prefix),
+                prefix = urlencode(&terminated),
             )
         };
         let listed = match self
