@@ -28,6 +28,8 @@ fn report(name: &'static str, probes: Vec<ProbeResult>, conflicts: &[&str]) -> S
         writes: 0,
         tool_calls: 0,
         pre_turn_timeouts: 0,
+        ranked_ready: None,
+        ranked_wait_ms: None,
         settle_ms: 0.0,
         synthesis: Synthesis {
             captured: Captured {

@@ -74,7 +74,7 @@ pub(crate) async fn run(
             runner.run(job).await?;
         }
     }
-    agent.flush().await?;
+    let _ = agent.flush().await?;
     let mut echoed_items = 0;
     let mut cursor = None;
     loop {

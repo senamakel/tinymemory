@@ -27,6 +27,7 @@
 //! ranking (`next_cursor: None`) when no hit beyond it was found.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
@@ -132,6 +133,7 @@ pub(super) fn ranked(pack: &Value, kind: Option<ItemKind>, filter: &MetaFilter) 
 impl CortexEngine {
     /// See the module docs.
     pub(super) async fn fetch_page(&self, req: FetchRequest) -> Result<FetchPage> {
+        let fetch_started = Instant::now();
         self.descriptor.ensure_mode(req.mode)?;
         req.validate()?;
         let (offset, chosen) = match &req.cursor {
@@ -146,7 +148,9 @@ impl CortexEngine {
             .saturating_add(1)
             .saturating_mul(EVENTS_PER_HIT)
             .min(MAX_PACK_EVENTS);
+        let discovery_started = Instant::now();
         let scopes = self.scopes_for(&req.filter).await?;
+        log::trace!(target: "tinymemory_eval_timing", "cortex_scope_discovery={}", discovery_started.elapsed().as_secs_f64() * 1_000.0);
         let (scopes, chosen) = match (req.max_scopes, chosen) {
             // A later page reads the scopes the first page chose.
             (Some(_), Some(paths)) => {
@@ -181,6 +185,7 @@ impl CortexEngine {
                 if let Some(temporal) = hint.as_ref().filter(|_| !self.refers_off()) {
                     body["temporal"] = temporal.clone();
                 }
+                let pack_started = Instant::now();
                 let pack = match self.log.recall(&body).await {
                     Err(error @ Error::InvalidRequest(_)) if hint.is_some() => {
                         body.as_object_mut().map(|body| body.remove("temporal"));
@@ -190,6 +195,7 @@ impl CortexEngine {
                     }
                     pack => pack?,
                 };
+                log::trace!(target: "tinymemory_eval_timing", "cortex_recall_pack={}", pack_started.elapsed().as_secs_f64() * 1_000.0);
                 let beliefs = if wanted_beliefs > 0 {
                     beliefs_in(&self.layout, &pack, "/layers/beliefs")
                 } else {
@@ -257,6 +263,7 @@ impl CortexEngine {
         } else {
             None
         };
+        log::trace!(target: "tinymemory_eval_timing", "cortex_fetch_total={}", fetch_started.elapsed().as_secs_f64() * 1_000.0);
         Ok(FetchPage {
             hits,
             next_cursor,

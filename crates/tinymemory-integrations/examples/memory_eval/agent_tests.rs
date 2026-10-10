@@ -7,6 +7,14 @@ use tinymemory_api::{LearningKind, ListRequest, MemoryEngine, MemoryMeta, StoreI
 use tinymemory_tools::MemoryLayout;
 
 #[test]
+fn openhuman_defaults_to_plain_recall_and_resumes_after_compaction() {
+    assert_eq!(HostHook::for_turn(false, false), HostHook::Plain);
+    assert_eq!(HostHook::for_turn(true, false), HostHook::Resumed);
+    assert_eq!(HostHook::for_turn(false, true), HostHook::Dated);
+    assert_eq!(HostHook::for_turn(true, true), HostHook::DatedResumed);
+}
+
+#[test]
 fn logged_reply_keeps_bounded_tool_results() {
     let long = "a".repeat(MAX_TOOL_LINE_CHARS + 20);
     let result = logged_reply(

@@ -5,6 +5,37 @@ use crate::{ItemKind, LearningKind, MemoryMeta};
 use super::*;
 
 #[tokio::test]
+async fn bulk_store_preserves_order_and_marks_existing_and_in_batch_replays() {
+    let engine = ReferenceEngine::new();
+    let a = StoreItem::document("alpha", MemoryMeta::default());
+    let b = StoreItem::document("beta", MemoryMeta::default());
+    engine.store(a.clone()).await.unwrap();
+    let receipts = engine
+        .store_many(vec![a.clone(), b.clone(), b.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|receipt| receipt.replayed)
+            .collect::<Vec<_>>(),
+        vec![true, false, true]
+    );
+    assert_eq!(engine.len(), 2);
+    let page = engine
+        .export(ListRequest::new(MetaFilter::default(), 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items
+            .into_iter()
+            .map(|entry| entry.item)
+            .collect::<Vec<_>>(),
+        vec![a, b]
+    );
+}
+
+#[tokio::test]
 async fn a_bad_cursor_is_an_invalid_request() {
     let engine = ReferenceEngine::new();
     let mut request = ListRequest::new(MetaFilter::default(), 1);

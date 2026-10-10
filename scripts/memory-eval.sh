@@ -29,6 +29,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 models="${MODELS:-mock}"
 port="${CORTEXDB_PORT:-3145}"
 label="${LABEL:-cortex-$models}"
+out="${OUT_DIR:-$root/target/memory-eval}"
+mkdir -p "$out"
 export CORTEXDB_PORT="$port"
 url="http://127.0.0.1:$port"
 compose=(docker compose --project-name "tinymemory-eval-$models-$port" -f "$root/integration/cortexdb/docker-compose.yml")
@@ -50,6 +52,37 @@ case "$models" in
     exit 1
     ;;
 esac
+
+# A shared budget file keeps a sequence of live runs below one spending cap.
+# The OpenRouter key's usage is cumulative, so unrelated concurrent spend is
+# counted conservatively too. Refuse a run when there is less than the
+# expected single-run reserve left.
+if [ "$models" = openrouter ] && [ -n "${BUDGET_USD:-}" ]; then
+  usage=""
+  for _ in 1 2 3 4 5; do
+    response="$(curl --fail --silent --max-time 10 https://openrouter.ai/api/v1/key \
+      -H "Authorization: Bearer $OPENROUTER_API_KEY" || true)"
+    usage="$(printf '%s' "$response" | python3 -c \
+      'import json,sys; print(json.load(sys.stdin)["data"]["usage"])' 2>/dev/null || true)"
+    [ -n "$usage" ] && break
+    sleep 2
+  done
+  if [ -z "$usage" ]; then
+    echo "could not read OpenRouter usage for the live budget" >&2
+    exit 1
+  fi
+  start_file="$out/live-budget-start"
+  if [ ! -f "$start_file" ]; then
+    printf '%s\n' "$usage" > "$start_file"
+  fi
+  start="$(cat "$start_file")"
+  if ! awk -v now="$usage" -v start="$start" -v cap="$BUDGET_USD" \
+    -v reserve="${COST_PER_RUN:-0.5}" \
+    'BEGIN { exit !((now - start + reserve) <= cap) }'; then
+    echo "live eval budget exhausted: spent since start plus reserve exceeds \$$BUDGET_USD" >&2
+    exit 1
+  fi
+fi
 
 # Like cortexdb-live.sh: never reuse or replace a server someone else runs.
 if curl --silent --max-time 2 "$url/v1/admin/health" >/dev/null 2>&1; then
@@ -84,8 +117,6 @@ curl --fail --silent "$url/v1/admin/ready" >/dev/null || {
 }
 echo "CortexDB $(curl --silent "$url/v1/admin/health") at $url, models: $models"
 
-out="${OUT_DIR:-$root/target/memory-eval}"
-mkdir -p "$out"
 CORTEX_DB_URL="$url" CORTEX_DB_KEY="${TINYMEMORY_TEST_CORTEX_KEY:-tinymemory-cortex-test}" \
   cargo run --quiet -p tinymemory-integrations --features full --example memory_eval -- \
   --label "$label" --json "$out/$label.json" "$@" |

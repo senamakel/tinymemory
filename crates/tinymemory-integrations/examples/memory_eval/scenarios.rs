@@ -21,6 +21,12 @@ pub(crate) const MAIN: &str = "main";
 
 /// Something written before the probes run.
 pub(crate) enum Step {
+    /// A seeded set of documents written in batches for the scale sweep.
+    BulkDocuments {
+        count: usize,
+        needle_at: usize,
+        seed: u64,
+    },
     /// A brain document.
     Doc {
         tenant: &'static str,
@@ -162,8 +168,11 @@ pub(crate) fn all() -> Vec<Scenario> {
         restart_recall(),
         contradictions(),
         tool_heavy(),
+        coding_session(),
+        task_drift(),
         team_handoff(),
         compaction(),
+        long_compaction(),
         isolation(),
         needle_in_noise(),
         learnings(),
@@ -172,6 +181,75 @@ pub(crate) fn all() -> Vec<Scenario> {
         conflicts(),
     ]
 }
+
+/// A controlled needle sweep. The same seed produces the same decoys at
+/// every size, while the chosen position moves the answer-bearing item.
+pub(crate) fn scaled(count: usize, position: &str, seed: u64) -> Result<Scenario, String> {
+    if !matches!(count, 100 | 1_000 | 10_000) {
+        return Err("--scale-events must be 100, 1000, or 10000".into());
+    }
+    let needle_at = match position {
+        "early" => count / 10,
+        "middle" => count / 2,
+        "late" => count - count / 10 - 1,
+        _ => return Err("--scale-position must be early, middle, or late".into()),
+    };
+    Ok(Scenario {
+        name: "needle_scale",
+        about: "One owner hidden among seeded near-duplicate support documents",
+        steps: vec![Step::BulkDocuments {
+            count,
+            needle_at,
+            seed,
+        }],
+        probes: vec![
+            Probe::new(
+                "owner-lexical",
+                "scale-agent",
+                "Who owns orbital cache invalidation?",
+                Style::Lexical,
+            )
+            .expect(&["Mira Solis"]),
+            Probe::new(
+                "owner-paraphrase",
+                "scale-agent",
+                "Which engineer handles the satellite cache refresh rule?",
+                Style::Paraphrase,
+            )
+            .expect(&["Mira Solis"]),
+        ],
+    })
+}
+
+/// A stable distractor or the answer-bearing document for a scale run.
+pub(crate) fn scale_document(index: usize, needle_at: usize, seed: u64) -> String {
+    if index == needle_at {
+        return format!("Case {index}: Mira Solis owns orbital cache invalidation.");
+    }
+    let shuffled = (index as u64)
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(seed);
+    let teams = [
+        "billing",
+        "search",
+        "mobile",
+        "storage",
+        "checkout",
+        "analytics",
+    ];
+    let owners = ["Nadia", "Owen", "Priya", "Rafael", "Tess", "Uma"];
+    let n = (shuffled >> 32) as usize;
+    format!(
+        "Case {index}: {} owns {} cache review. The refresh checklist is in playbook {}.",
+        owners[n % owners.len()],
+        teams[(n / 7) % teams.len()],
+        n % 997
+    )
+}
+
+#[cfg(test)]
+#[path = "scenarios_tests.rs"]
+mod tests;
 
 /// User turns with no tool calls.
 fn said(lines: &[&str]) -> Vec<(String, Vec<ToolStep>)> {
@@ -598,6 +676,196 @@ fn tool_heavy() -> Scenario {
                 Paraphrase,
             )
             .expect(&["jmiller"]),
+        ],
+    }
+}
+
+fn coding_session() -> Scenario {
+    use Style::{Lexical, Paraphrase};
+    Scenario {
+        name: "coding_session",
+        about: "A coding decision, failing test, and file path found only in tool results",
+        steps: vec![chat(
+            "coder-42",
+            "retry-fix",
+            0,
+            vec![
+                (
+                    "Find why the API retries a refused connection.".into(),
+                    vec![
+                        tool("read_file", "src/client/retry.rs: retry_on_connect=false"),
+                        tool(
+                            "run_tests",
+                            "FAILED test_retries_refused_connection at retry_tests.rs:81",
+                        ),
+                    ],
+                ),
+                (
+                    "Try the proposed change and inspect the diff.".into(),
+                    vec![
+                        tool(
+                            "git_diff",
+                            "retry_on_connect=true caused duplicate writes after ambiguous timeout",
+                        ),
+                        tool("run_tests", "FAILED test_does_not_repeat_unknown_write"),
+                    ],
+                ),
+                (
+                    "Revert that change and keep the safe path.".into(),
+                    vec![tool(
+                        "git_diff",
+                        "reverted retry_on_connect=true; kept writes single-attempt",
+                    )],
+                ),
+            ],
+        )],
+        probes: vec![
+            Probe::new(
+                "retry-file",
+                "coder-42",
+                "Which file contains the retry policy?",
+                Lexical,
+            )
+            .expect(&["src/client/retry.rs"]),
+            Probe::new(
+                "failed-test",
+                "coder-42",
+                "Which test exposed the unsafe retry?",
+                Paraphrase,
+            )
+            .expect(&["test_does_not_repeat_unknown_write"]),
+            Probe::new(
+                "why-revert",
+                "coder-42",
+                "Why did we back out the connection retry?",
+                Paraphrase,
+            )
+            .expect(&["duplicate writes"]),
+        ],
+    }
+}
+
+fn task_drift() -> Scenario {
+    use Style::{Lexical, Paraphrase};
+    Scenario {
+        name: "task_drift",
+        about: "A two-week task changes owner and plan while old status remains searchable",
+        steps: vec![
+            chat(
+                "planner-07",
+                "migration",
+                0,
+                said(&[
+                    "The ledger migration is owned by Anna. Plan A is a Friday cutover.",
+                    "The blocker is an unverified backfill checksum.",
+                ]),
+            ),
+            chat(
+                "planner-07",
+                "migration-update",
+                7,
+                said(&[
+                    "The ledger migration moved to Ravi. Plan B is a staged Monday cutover.",
+                    "The backfill checksum is verified; the current blocker is partner signoff.",
+                ]),
+            ),
+            chat(
+                "planner-07",
+                "migration-resume",
+                14,
+                said(&[
+                    "Resume the ledger migration. Ravi still owns it; partner signoff remains open.",
+                ]),
+            ),
+        ],
+        probes: vec![
+            Probe::new(
+                "current-owner",
+                "planner-07",
+                "Who owns the ledger migration now?",
+                Lexical,
+            )
+            .expect(&["Ravi"])
+            .stale(&["Anna"]),
+            Probe::new(
+                "current-blocker",
+                "planner-07",
+                "What still blocks the cutover?",
+                Paraphrase,
+            )
+            .expect(&["partner signoff"])
+            .stale(&["unverified backfill checksum"]),
+            Probe::new(
+                "changed-plan",
+                "planner-07",
+                "What is the new release approach?",
+                Paraphrase,
+            )
+            .expect(&["staged Monday cutover"])
+            .stale(&["Friday cutover"]),
+        ],
+    }
+}
+
+fn long_compaction() -> Scenario {
+    use Style::Lexical;
+    let mut turns = said(&["The archive key is indigo-cedar; retain it after compaction."]);
+    turns.extend((1..200).map(|n| {
+        (
+            format!("Routine planning note {n}: check the agenda."),
+            Vec::new(),
+        )
+    }));
+    let first: Vec<String> = turns
+        .iter()
+        .take(100)
+        .map(|(text, _)| text.clone())
+        .collect();
+    let second: Vec<String> = turns
+        .iter()
+        .take(180)
+        .map(|(text, _)| text.clone())
+        .collect();
+    Scenario {
+        name: "long_compaction",
+        about: "Two compaction windows over a 200-exchange thread",
+        steps: vec![chat("planner-07", "archive", 0, turns)],
+        probes: vec![
+            Probe::new(
+                "first-compaction",
+                "planner-07",
+                "What archive key must survive?",
+                Lexical,
+            )
+            .via(Via::Compact {
+                thread: "archive",
+                dropped: first,
+            })
+            .expect(&["indigo-cedar"]),
+            Probe::new(
+                "second-compaction",
+                "planner-07",
+                "What archive key must survive?",
+                Lexical,
+            )
+            .via(Via::Compact {
+                thread: "archive",
+                dropped: second,
+            })
+            .expect(&["indigo-cedar"]),
+            Probe::new(
+                "resumed-window",
+                "planner-07",
+                "What archive key must survive?",
+                Lexical,
+            )
+            .via(Via::Continue {
+                thread: "archive",
+                turn_index: 400,
+                in_prompt_from: 392,
+            })
+            .expect(&["indigo-cedar"])
+            .forbid(&["planning note 198", "planning note 199"]),
         ],
     }
 }
