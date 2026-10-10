@@ -39,9 +39,11 @@ with team recall off and $0.021 with it on; that difference is noise at this
 sample size.
 
 The source references below use OpenHuman commit `cf16716f4f` for the hook
-behavior and [OpenHuman PR #7346](https://github.com/tinyhumansai/openhuman/pull/7346)
-for the 5000 ms default.
-Update them when the host's defaults or hook behavior changes.
+behavior, [OpenHuman PR #7346](https://github.com/tinyhumansai/openhuman/pull/7346)
+for the 5000 ms deadline, and
+[OpenHuman PR #7352](https://github.com/tinyhumansai/openhuman/pull/7352)
+for the proposed three-turn team default. Update them when the host's
+defaults or hook behavior changes.
 
 | Behavior | Eval mirror | OpenHuman source |
 | --- | --- | --- |
