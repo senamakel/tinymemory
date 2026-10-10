@@ -209,7 +209,9 @@ pub(super) async fn namespaces(ctx: &Ctx<'_>) -> Result<()> {
         )
     })?;
     let left = ids_in(ctx, &Reach::subtree(Namespace::ROOT)).await?;
-    let wanted: BTreeSet<ItemId> = [root, a, scout].into_iter().collect();
+    let wanted: BTreeSet<ItemId> = [root.clone(), a.clone(), scout.clone()]
+        .into_iter()
+        .collect();
     ensure(CHECK, left == wanted, || {
         format!("after forgetting agent b, {left:?} remain")
     })?;
