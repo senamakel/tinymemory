@@ -24,6 +24,36 @@ use tinymemory_tools::{AgentMemory, BackgroundJob, PostTurn, PreTurn, TurnContex
 
 /// OpenHuman's default deadline for the pack before a model turn.
 pub(crate) const PRE_TURN_TIMEOUT: StdDuration = StdDuration::from_millis(1_500);
+
+/// The host selects one lifecycle hook from its recall configuration and
+/// whether the thread is resuming after compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostHook {
+    Plain,
+    Resumed,
+    Dated,
+    DatedResumed,
+}
+
+impl HostHook {
+    pub(crate) fn for_turn(resumed: bool, date_hint: bool) -> Self {
+        match (resumed, date_hint) {
+            (false, false) => Self::Plain,
+            (true, false) => Self::Resumed,
+            (false, true) => Self::Dated,
+            (true, true) => Self::DatedResumed,
+        }
+    }
+
+    pub(crate) async fn run(self, memory: AgentMemory, pre: PreTurn) -> Result<TurnContext, Error> {
+        match self {
+            Self::Plain => memory.pre_turn(pre).await,
+            Self::Resumed => memory.pre_turn_resumed(pre).await,
+            Self::Dated => memory.pre_turn_dated(pre, false, async { None }).await,
+            Self::DatedResumed => memory.pre_turn_dated(pre, true, async { None }).await,
+        }
+    }
+}
 /// OpenHuman's maximum length of one logged tool result.
 const MAX_TOOL_LINE_CHARS: usize = 240;
 
@@ -59,6 +89,11 @@ pub(crate) struct TurnRecord {
     pub(crate) tool_calls: usize,
 }
 
+type PendingPreTurn = (
+    Instant,
+    tokio::task::JoinHandle<(Result<TurnContext, Error>, Instant)>,
+);
+
 /// One conversation thread driven by the script.
 pub(crate) struct ScriptedAgent {
     memory: AgentMemory,
@@ -68,7 +103,14 @@ pub(crate) struct ScriptedAgent {
     window: u32,
     clock: Option<DateTime<Utc>>,
     openhuman: bool,
-    pending: Vec<tokio::task::JoinHandle<Result<TurnContext, Error>>>,
+    date_hint: bool,
+    pending: Vec<PendingPreTurn>,
+}
+
+/// User turns that completed after the simulated host stopped waiting.
+pub(crate) struct FlushReport {
+    pub(crate) logged: usize,
+    pub(crate) completion_ms: Vec<f64>,
 }
 
 impl ScriptedAgent {
@@ -82,27 +124,40 @@ impl ScriptedAgent {
             window,
             clock: None,
             openhuman: false,
+            date_hint: false,
             pending: Vec::new(),
         }
     }
 
-    /// Mirror OpenHuman's dated hook, deadline, and reply logging.
+    /// Mirror OpenHuman's default hook, deadline, and reply logging.
     pub(crate) fn openhuman(mut self) -> Self {
         self.openhuman = true;
         self
     }
 
+    /// Exercise the host's optional dated-recall path.
+    pub(crate) fn date_hint(mut self) -> Self {
+        self.date_hint = true;
+        self
+    }
+
     /// Wait for pre-turn tasks whose host deadline expired. OpenHuman leaves
     /// those tasks running, so their accepted user turns may still land.
-    pub(crate) async fn flush(&mut self) -> Result<usize, Error> {
+    pub(crate) async fn flush(&mut self) -> Result<FlushReport, Error> {
         let mut logged = 0;
-        for task in self.pending.drain(..) {
-            let context = task
+        let mut completion_ms = Vec::new();
+        for (started, task) in self.pending.drain(..) {
+            let (context, completed) = task
                 .await
-                .map_err(|error| Error::Unavailable(format!("pre-turn task failed: {error}")))??;
+                .map_err(|error| Error::Unavailable(format!("pre-turn task failed: {error}")))?;
+            let context = context?;
             logged += usize::from(context.logged.is_some());
+            completion_ms.push(completed.duration_since(started).as_secs_f64() * 1_000.0);
         }
-        Ok(logged)
+        Ok(FlushReport {
+            logged,
+            completion_ms,
+        })
     }
 
     /// Timestamps the thread's turns from `at`, a minute apart.
@@ -136,16 +191,21 @@ impl ScriptedAgent {
         let started = Instant::now();
         let context = if self.openhuman {
             let memory = self.memory.clone();
-            let mut task =
-                tokio::spawn(
-                    async move { memory.pre_turn_dated(pre, false, async { None }).await },
-                );
+            let hook = HostHook::for_turn(false, self.date_hint);
+            let mut task = tokio::spawn(async move {
+                let result = hook.run(memory, pre).await;
+                (result, Instant::now())
+            });
             match tokio::time::timeout(PRE_TURN_TIMEOUT, &mut task).await {
-                Ok(result) => Some(result.map_err(|error| {
-                    Error::Unavailable(format!("pre-turn task failed: {error}"))
-                })??),
+                Ok(result) => Some(
+                    result
+                        .map_err(|error| {
+                            Error::Unavailable(format!("pre-turn task failed: {error}"))
+                        })?
+                        .0?,
+                ),
                 Err(_) => {
-                    self.pending.push(task);
+                    self.pending.push((started, task));
                     None
                 }
             }

@@ -60,9 +60,11 @@
 mod agent;
 mod compare;
 mod inspect;
+mod instrument;
 mod kpi;
 mod llm;
 mod loop_guard;
+mod safety;
 mod scenarios;
 mod score;
 
@@ -74,8 +76,8 @@ use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use tinymemory_api::conformance::ReferenceEngine;
 use tinymemory_api::{
-    ConsolidateRequest, ForgetTarget, ListRequest, MemoryEngine, MemoryMeta, Reach, Role,
-    StoreItem, Turn,
+    ConsolidateRequest, FetchMode, FetchRequest, ForgetTarget, ListRequest, MAX_STORE_MANY,
+    MemoryEngine, MemoryMeta, Reach, Role, StoreItem, Turn, TurnRange, WriteOptions,
 };
 use tinymemory_integrations::cortex::{
     CortexCredential, CortexEngine, StaticBearer, TINYHUMANS_API_ENDPOINT,
@@ -86,7 +88,7 @@ use tinymemory_tools::{
     MemoryLayout, PreTurn, RecallPolicy, SessionStart,
 };
 
-use agent::{PRE_TURN_TIMEOUT, ScriptedAgent, ms};
+use agent::{HostHook, PRE_TURN_TIMEOUT, ScriptedAgent, ms};
 use inspect::{Captured, Derived, Inspector, Usage};
 use llm::Llm;
 use scenarios::{MAIN, Probe, Scenario, Step, Via};
@@ -103,6 +105,20 @@ const WINDOW: u32 = 8;
 
 /// The longest a scenario's writes may take to become visible.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bulk accepted writes can take longer to become fully listable.
+const SCALE_SETTLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn settle_timeout(scenario: &str) -> Duration {
+    if scenario == "needle_scale" {
+        SCALE_SETTLE_TIMEOUT
+    } else {
+        SETTLE_TIMEOUT
+    }
+}
+
+fn settle_page_size(expected: usize) -> usize {
+    expected.clamp(100, 1_000)
+}
 
 /// Consecutive empty, quiet polls of the enrichment queue (3 s apart) that
 /// count as drained.
@@ -117,6 +133,13 @@ struct Args {
     label: String,
     llm: bool,
     host: String,
+    date_hint: bool,
+    scale_events: Option<usize>,
+    scale_position: String,
+    ranked_wait: u64,
+    seed: u64,
+    safety_audit: bool,
+    expect_derived: bool,
     loop_guard: bool,
 }
 
@@ -133,6 +156,13 @@ fn args() -> Result<Args, Error> {
         label: String::new(),
         llm: false,
         host: "scripted".into(),
+        date_hint: false,
+        scale_events: None,
+        scale_position: "middle".into(),
+        ranked_wait: 0,
+        seed: 251,
+        safety_audit: false,
+        expect_derived: false,
         loop_guard: false,
     };
     let mut raw = std::env::args().skip(1);
@@ -146,6 +176,13 @@ fn args() -> Result<Args, Error> {
             "--label" => parsed.label = value()?,
             "--llm" => parsed.llm = true,
             "--host" => parsed.host = value()?,
+            "--date-hint" => parsed.date_hint = true,
+            "--scale-events" => parsed.scale_events = Some(value()?.parse()?),
+            "--scale-position" => parsed.scale_position = value()?,
+            "--ranked-wait" => parsed.ranked_wait = value()?.parse()?,
+            "--seed" => parsed.seed = value()?.parse()?,
+            "--safety-audit" => parsed.safety_audit = true,
+            "--expect-derived" => parsed.expect_derived = true,
             "--loop-guard" => parsed.loop_guard = true,
             other => return Err(format!("unknown flag {other}").into()),
         }
@@ -155,6 +192,15 @@ fn args() -> Result<Args, Error> {
     }
     if parsed.loop_guard && parsed.host != "openhuman" {
         return Err("--loop-guard requires --host openhuman".into());
+    }
+    if parsed.date_hint && parsed.host != "openhuman" {
+        return Err("--date-hint requires --host openhuman".into());
+    }
+    if parsed.expect_derived && !parsed.safety_audit {
+        return Err("--expect-derived requires --safety-audit".into());
+    }
+    if parsed.ranked_wait > 0 && parsed.scale_events.is_none() {
+        return Err("--ranked-wait requires --scale-events".into());
     }
     if parsed.label.is_empty() {
         parsed.label = parsed.engine.clone();
@@ -184,6 +230,8 @@ struct Synthesis {
     derived: Vec<Derived>,
     /// Every fact, belief and conflict CortexDB holds for the scenario.
     captured: Captured,
+    /// Whether the queue reached four quiet polls before the wait cap.
+    enrichment_drained: Option<bool>,
 }
 
 /// One scenario's results.
@@ -199,6 +247,8 @@ struct ScenarioReport {
     probes: Vec<ProbeResult>,
     /// What CortexDB's models spent on this scenario.
     usage: Option<Usage>,
+    ranked_ready: Option<bool>,
+    ranked_wait_ms: Option<f64>,
 }
 
 /// The CortexDB flag profile a run is under: its name, and every flag it
@@ -233,7 +283,18 @@ async fn main() -> Result<(), Error> {
         return compare::run(&raw[1..]);
     }
     let args = args()?;
+    instrument::install();
     let (profile, flags) = profile()?;
+    let models: BTreeMap<&str, String> = [
+        "CORTEX_EMBEDDING_MODEL",
+        "CORTEX_EXTRACTION_MODEL",
+        "CORTEX_ENRICHMENT_MODEL",
+        "CORTEX_ANSWER_MODEL",
+        "CORTEX_VERIFIER_MODEL",
+    ]
+    .into_iter()
+    .filter_map(|name| std::env::var(name).ok().map(|value| (name, value)))
+    .collect();
     let url = std::env::var("CORTEX_DB_URL").unwrap_or_default();
     let key = std::env::var("CORTEX_DB_KEY").unwrap_or_else(|_| "tinymemory-cortex-test".into());
     let (engine, inspector): (Arc<dyn MemoryEngine>, Option<Inspector>) = match args.engine.as_str()
@@ -301,6 +362,8 @@ async fn main() -> Result<(), Error> {
         enrich_wait,
         policy,
         openhuman: args.host == "openhuman",
+        date_hint: args.date_hint,
+        ranked_wait: args.ranked_wait,
     };
     let usage_before = match &eval.inspector {
         Some(inspector) => Some(inspector.usage().await?),
@@ -308,7 +371,15 @@ async fn main() -> Result<(), Error> {
     };
     let mut timings = Timings::default();
     let mut reports = Vec::new();
-    for scenario in scenarios::all() {
+    let cases = if let Some(count) = args.scale_events {
+        vec![scenarios::scaled(count, &args.scale_position, args.seed)?]
+    } else {
+        scenarios::all()
+    };
+    for scenario in cases {
+        if scenario.name == "long_compaction" && args.only.is_none() {
+            continue;
+        }
         if args
             .only
             .as_deref()
@@ -340,6 +411,23 @@ async fn main() -> Result<(), Error> {
     } else {
         None
     };
+    let safety = if args.safety_audit {
+        let report = safety::run(
+            engine.clone(),
+            eval.inspector.as_ref(),
+            run,
+            args.expect_derived,
+        )
+        .await?;
+        println!(
+            "\n## Safety audit\n\n```json\n{}\n```",
+            serde_json::to_string_pretty(&report)?
+        );
+        Some(report)
+    } else {
+        None
+    };
+    instrument::drain(&mut timings);
     print_summary(&args.label, &reports, &timings);
     let usage = match (&eval.inspector, usage_before) {
         (Some(inspector), Some(before)) => Some(inspector.usage().await?.since(&before)),
@@ -376,12 +464,21 @@ async fn main() -> Result<(), Error> {
             "label": args.label,
             "profile": profile,
             "flags": flags,
+            "models": models,
+            "probe_answer_model": eval.llm.as_ref().map(|llm| llm.model.as_str()),
             "server": server,
             "engine": engine.descriptor().id,
             "host": args.host,
+            "date_hint": args.date_hint,
+            "scale_events": args.scale_events,
+            "scale_position": args.scale_position,
+            "ranked_wait": args.ranked_wait,
+            "seed": args.seed,
             "run": run,
             "scenarios": reports,
             "loop_guard": loop_guard,
+            "safety": safety,
+            "expect_derived": args.expect_derived,
             "timings": timings,
             "usage": usage,
             "kpis": kpis,
@@ -394,6 +491,12 @@ async fn main() -> Result<(), Error> {
         .is_some_and(|report| report.echoed_items > 0)
     {
         return Err("loop guard found injected pack text in stored items".into());
+    }
+    if safety
+        .as_ref()
+        .is_some_and(|report| report.violations() > 0)
+    {
+        return Err("safety audit found a leaked or residual item".into());
     }
     Ok(())
 }
@@ -410,6 +513,7 @@ fn tenants(scenario: &Scenario) -> Vec<&'static str> {
         .steps
         .iter()
         .map(|step| match step {
+            Step::BulkDocuments { .. } => MAIN,
             Step::Doc { tenant, .. } | Step::Chat { tenant, .. } => *tenant,
             Step::Learning { .. } => MAIN,
         })
@@ -418,6 +522,24 @@ fn tenants(scenario: &Scenario) -> Vec<&'static str> {
     tenants.sort_unstable();
     tenants.dedup();
     tenants
+}
+
+/// The host queue need only execute one pending belief build per identical
+/// scope: each build reads all accepted writes when it runs. Keep ingestion
+/// jobs in order because they carry distinct documents.
+fn coalesce_builds(jobs: Vec<BackgroundJob>) -> Vec<BackgroundJob> {
+    let mut builds = Vec::new();
+    let mut ready = Vec::new();
+    for job in jobs {
+        if matches!(job, BackgroundJob::BuildBeliefs { .. }) {
+            if builds.contains(&job) {
+                continue;
+            }
+            builds.push(job.clone());
+        }
+        ready.push(job);
+    }
+    ready
 }
 
 /// One eval run: the engine, the optional helpers, and the settings every
@@ -433,6 +555,8 @@ struct Eval {
     enrich_wait: u64,
     policy: RecallPolicy,
     openhuman: bool,
+    date_hint: bool,
+    ranked_wait: u64,
 }
 
 impl Eval {
@@ -465,6 +589,33 @@ impl Eval {
         let mut pre_turn_timeouts = 0;
         for step in &scenario.steps {
             match step {
+                Step::BulkDocuments {
+                    count,
+                    needle_at,
+                    seed,
+                } => {
+                    let node = layout(run, scenario.name, MAIN)?
+                        .brain(&tinymemory_tools::BrainSource::Files)?;
+                    let started = Instant::now();
+                    for start in (0..*count).step_by(MAX_STORE_MANY) {
+                        let batch = (start..(*count).min(start + MAX_STORE_MANY))
+                            .map(|index| {
+                                StoreItem::document(
+                                    scenarios::scale_document(index, *needle_at, *seed),
+                                    MemoryMeta {
+                                        namespace: node.clone(),
+                                        ..MemoryMeta::default()
+                                    },
+                                )
+                            })
+                            .collect();
+                        engine
+                            .store_many_with(batch, WriteOptions::accepted())
+                            .await?;
+                    }
+                    timings.add("bulk ingest (accepted)", ms(started));
+                    *writes.entry(MAIN).or_default() += *count;
+                }
                 Step::Doc {
                     tenant,
                     source,
@@ -506,6 +657,9 @@ impl Eval {
                         .at(epoch + chrono::Duration::days(*day));
                     if self.openhuman {
                         scripted = scripted.openhuman();
+                        if self.date_hint {
+                            scripted = scripted.date_hint();
+                        }
                     }
                     for (text, tools) in turns {
                         let record = scripted.user(text, tools).await?;
@@ -521,7 +675,11 @@ impl Eval {
                         jobs.extend(record.jobs);
                         *writes.entry(tenant).or_default() += 1 + usize::from(record.logged);
                     }
-                    *writes.entry(tenant).or_default() += scripted.flush().await?;
+                    let flushed = scripted.flush().await?;
+                    *writes.entry(tenant).or_default() += flushed.logged;
+                    for elapsed in flushed.completion_ms {
+                        timings.add("pre_turn completed after deadline", elapsed);
+                    }
                 }
             }
         }
@@ -529,19 +687,77 @@ impl Eval {
         // Settle: wait until every write is listed.
         let started = Instant::now();
         for (tenant, expected) in &writes {
-            self.settle(&layout(run, scenario.name, tenant)?, *expected)
-                .await?;
+            self.settle(
+                &layout(run, scenario.name, tenant)?,
+                *expected,
+                settle_timeout(scenario.name),
+            )
+            .await?;
         }
         let settle_ms = ms(started);
         timings.add("settle (all writes listed)", settle_ms);
+
+        let (ranked_ready, ranked_wait_ms) = if scenario.name == "needle_scale" {
+            let started = Instant::now();
+            let ready = loop {
+                // The unique owner name checks indexing without warming a
+                // scored question's exact query.
+                let mut req = FetchRequest::new("Mira Solis", FetchMode::Hybrid, 10);
+                req.filter = layout(run, scenario.name, MAIN)?.brain_filter(None);
+                let fetch_started = Instant::now();
+                let page = engine.fetch(req).await?;
+                timings.add("scale direct fetch", ms(fetch_started));
+                if page.hits.iter().any(|hit| hit.text.contains("Mira Solis")) {
+                    break true;
+                }
+                if started.elapsed() >= Duration::from_secs(self.ranked_wait) {
+                    break false;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            };
+            (Some(ready), Some(ms(started)))
+        } else {
+            (None, None)
+        };
 
         let mut probes = Vec::new();
         for probe in &scenario.probes {
             probes.push(self.probe(scenario, probe, "recall", timings).await?);
         }
 
+        // The scale sweep measures retrieval over the planted corpus. Building
+        // thousands of reference beliefs changes that corpus and obscures
+        // the position/depth comparison.
+        if scenario.name == "needle_scale" {
+            if std::env::var("CORTEX_DB_KEEP").is_err() {
+                engine
+                    .forget(ForgetTarget::Filter(
+                        layout(run, scenario.name, MAIN)?.holistic_filter(),
+                    ))
+                    .await?;
+            }
+            let usage = match (&self.inspector, usage_before) {
+                (Some(inspector), Some(before)) => Some(inspector.usage().await?.since(&before)),
+                _ => None,
+            };
+            return Ok(ScenarioReport {
+                name: scenario.name,
+                about: scenario.about,
+                writes: writes.values().sum(),
+                tool_calls,
+                pre_turn_timeouts,
+                settle_ms,
+                synthesis: Synthesis::default(),
+                probes,
+                usage,
+                ranked_ready,
+                ranked_wait_ms,
+            });
+        }
+
         // Synthesis: the jobs the writes handed back, then one build per tenant
         // over its whole tree.
+        let mut enrichment_drained = None;
         if let Some(inspector) = &self.inspector {
             let started = Instant::now();
             let cap = Duration::from_secs(self.enrich_wait);
@@ -559,7 +775,16 @@ impl Eval {
             }
             let waited = ms(started);
             timings.add("enrichment (queue drained)", waited);
-            println!("   enrichment drained in {:.0} s", waited / 1e3);
+            enrichment_drained = Some(quiet >= DRAINED_POLLS);
+            println!(
+                "   enrichment {} in {:.0} s",
+                if quiet >= DRAINED_POLLS {
+                    "drained"
+                } else {
+                    "hit wait cap"
+                },
+                waited / 1e3
+            );
         } else if self.hosted && self.enrich_wait > 0 {
             // No queue to read (hosted): give enrichment its usual lag.
             tokio::time::sleep(Duration::from_secs(self.enrich_wait)).await;
@@ -574,9 +799,11 @@ impl Eval {
                 request: ConsolidateRequest::new(Reach::subtree(root)),
             });
         }
+        let jobs = coalesce_builds(jobs);
         let runner = memory(MAIN, "eval")?.background();
         let mut synthesis = Synthesis {
             jobs: jobs.len(),
+            enrichment_drained,
             ..Synthesis::default()
         };
         let started = Instant::now();
@@ -660,6 +887,8 @@ impl Eval {
         };
         Ok(ScenarioReport {
             usage,
+            ranked_ready,
+            ranked_wait_ms,
             name: scenario.name,
             about: scenario.about,
             writes: writes.values().sum(),
@@ -672,13 +901,19 @@ impl Eval {
     }
 
     /// Waits until `layout` lists at least `expected` items.
-    async fn settle(&self, layout: &MemoryLayout, expected: usize) -> Result<(), Error> {
+    async fn settle(
+        &self,
+        layout: &MemoryLayout,
+        expected: usize,
+        timeout: Duration,
+    ) -> Result<(), Error> {
         let started = Instant::now();
         loop {
             let mut listed = 0;
             let mut cursor = None;
             loop {
-                let mut req = ListRequest::new(layout.holistic_filter(), 100);
+                let mut req =
+                    ListRequest::new(layout.holistic_filter(), settle_page_size(expected));
                 req.cursor = cursor;
                 let page = self.engine.list(req).await?;
                 listed += page.items.len();
@@ -690,7 +925,7 @@ impl Eval {
             if listed >= expected {
                 return Ok(());
             }
-            if started.elapsed() > SETTLE_TIMEOUT {
+            if started.elapsed() > timeout {
                 return Err(format!(
                     "only {listed} of {expected} writes visible under {}",
                     layout.root()
@@ -719,14 +954,21 @@ impl Eval {
         let started = Instant::now();
         let mut timed_out = false;
         let mut host_elapsed = None;
+        let mut completion_elapsed = None;
         let (markdown, tokens) = match &probe.via {
             Via::Ask => {
                 let thread = format!("probe-{}", probe.id);
                 let pre = PreTurn::new(thread, 0, probe.question);
                 if self.openhuman {
-                    let (pack, timeout, elapsed) = host_probe_pack(memory.clone(), pre).await?;
+                    let (pack, timeout, elapsed, completed) = host_probe_pack(
+                        memory.clone(),
+                        pre,
+                        HostHook::for_turn(false, self.date_hint),
+                    )
+                    .await?;
                     timed_out = timeout;
                     host_elapsed = Some(elapsed);
+                    completion_elapsed = completed;
                     pack
                 } else {
                     pack(memory.pre_turn(pre).await?.pack)
@@ -760,9 +1002,15 @@ impl Eval {
                 let mut pre = PreTurn::new(*thread, *turn_index, probe.question);
                 pre.in_prompt_from = *in_prompt_from;
                 if self.openhuman {
-                    let (pack, timeout, elapsed) = host_probe_pack(memory.clone(), pre).await?;
+                    let (pack, timeout, elapsed, completed) = host_probe_pack(
+                        memory.clone(),
+                        pre,
+                        HostHook::for_turn(true, self.date_hint),
+                    )
+                    .await?;
                     timed_out = timeout;
                     host_elapsed = Some(elapsed);
+                    completion_elapsed = completed;
                     pack
                 } else {
                     pack(memory.pre_turn(pre).await?.pack)
@@ -790,6 +1038,26 @@ impl Eval {
             result.llm_cost_usd = answer.cost_usd;
         }
         timings.add(&format!("probe {}", result.via), elapsed);
+        if let Some(completed) = completion_elapsed {
+            timings.add("probe pre_turn completed after deadline", completed);
+        }
+        let logged_turn = match &probe.via {
+            Via::Ask => Some((format!("probe-{}", probe.id), 0)),
+            Via::Continue {
+                thread, turn_index, ..
+            } => Some(((*thread).to_string(), *turn_index)),
+            _ => None,
+        };
+        if let Some((thread_id, index)) = logged_turn {
+            let mut filter =
+                layout(run, scenario.name, probe.tenant)?.conversations_filter(Some(probe.agent));
+            filter.thread_id = Some(thread_id);
+            filter.turns = Some(TurnRange {
+                first: index,
+                last: index,
+            });
+            engine.forget(ForgetTarget::Filter(filter)).await?;
+        }
         Ok(result)
     }
 }
@@ -804,16 +1072,25 @@ fn pack(pack: ContextPack) -> (String, usize) {
 async fn host_probe_pack(
     memory: AgentMemory,
     pre: PreTurn,
-) -> Result<((String, usize), bool, f64), Error> {
+    hook: HostHook,
+) -> Result<((String, usize), bool, f64, Option<f64>), Error> {
     let started = Instant::now();
-    let mut task =
-        tokio::spawn(async move { memory.pre_turn_dated(pre, false, async { None }).await });
+    let mut task = tokio::spawn(async move {
+        let result = hook.run(memory, pre).await;
+        (result, Instant::now())
+    });
     match tokio::time::timeout(PRE_TURN_TIMEOUT, &mut task).await {
-        Ok(context) => Ok((pack(context??.pack), false, ms(started))),
+        Ok(context) => Ok((pack(context?.0?.pack), false, ms(started), None)),
         Err(_) => {
             let elapsed = ms(started);
-            task.await??;
-            Ok(((String::new(), 0), true, elapsed))
+            let (context, completed) = task.await?;
+            context?;
+            Ok((
+                (String::new(), 0),
+                true,
+                elapsed,
+                Some(completed.duration_since(started).as_secs_f64() * 1_000.0),
+            ))
         }
     }
 }
@@ -911,3 +1188,7 @@ fn print_summary(label: &str, reports: &[ScenarioReport], timings: &Timings) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

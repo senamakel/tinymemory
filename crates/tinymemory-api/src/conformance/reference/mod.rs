@@ -11,6 +11,7 @@
 mod distil;
 mod score;
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 pub use distil::CONSOLIDATED_TAG;
@@ -211,6 +212,26 @@ impl MemoryEngine for ReferenceEngine {
             items.push(item);
         }
         Ok(StoreReceipt { id, replayed })
+    }
+
+    async fn store_many(&self, batch: Vec<StoreItem>) -> Result<Vec<StoreReceipt>> {
+        crate::validate_many(&batch)?;
+        let mut items = self.items()?;
+        // Compute held fingerprints once per batch. Calling `store` for each
+        // item rehashes every preceding item, which makes scale sweeps
+        // quadratic in the number of documents.
+        let mut seen: HashSet<String> = items.iter().map(StoreItem::fingerprint).collect();
+        let mut receipts = Vec::with_capacity(batch.len());
+        for item in batch {
+            item.validate()?;
+            let id = ItemId(item.fingerprint());
+            let replayed = !seen.insert(id.0.clone());
+            if !replayed {
+                items.push(item);
+            }
+            receipts.push(StoreReceipt { id, replayed });
+        }
+        Ok(receipts)
     }
 
     async fn forget(&self, target: ForgetTarget) -> Result<ForgetReport> {

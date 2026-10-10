@@ -28,6 +28,7 @@
 //! itself.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use futures::future::join;
 use tinymemory_api::{
@@ -89,6 +90,7 @@ pub(super) async fn section(
     beliefs: usize,
     dated: bool,
 ) -> Gathered {
+    let section_started = Instant::now();
     let keep = |hit: &Hit| !request.excludes(hit);
     let want = wanted(request, section);
     // A date reorders a fetch section's hits after the read, so read deeper
@@ -105,7 +107,10 @@ pub(super) async fn section(
             instructions,
             fallback_to_fetch,
         } => match answer(engine, request, section, question, instructions.clone()).await {
-            Ok(Some(filled)) => return filled,
+            Ok(Some(filled)) => {
+                log::trace!(target: "tinymemory_eval_timing", "recall_section={}", section_started.elapsed().as_secs_f64() * 1_000.0);
+                return filled;
+            }
             Ok(None) => Ok((Vec::new(), Vec::new())),
             Err(error) if *fallback_to_fetch => {
                 log::debug!(
@@ -140,6 +145,7 @@ pub(super) async fn section(
         }
         SectionQuery::Latest => with_listed_beliefs(engine, section, want, &keep).await,
     };
+    log::trace!(target: "tinymemory_eval_timing", "recall_section={}", section_started.elapsed().as_secs_f64() * 1_000.0);
     match outcome {
         Ok((hits, beliefs)) => Gathered::Hits { hits, beliefs },
         Err(error) => {
