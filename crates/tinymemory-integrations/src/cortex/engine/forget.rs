@@ -67,10 +67,7 @@ impl CortexEngine {
         ids: Vec<ItemId>,
         reach: Reach,
     ) -> Result<ForgetReport> {
-        let ids: Vec<String> = forget_within_ids(ids)?
-            .into_iter()
-            .map(|id| id.0)
-            .collect();
+        let ids: Vec<String> = forget_within_ids(ids)?.into_iter().map(|id| id.0).collect();
         let filter = MetaFilter {
             reach: Some(reach),
             ..MetaFilter::default()

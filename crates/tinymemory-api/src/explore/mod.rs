@@ -450,7 +450,10 @@ pub fn forget_within_ids(ids: Vec<ItemId>) -> Result<Vec<ItemId>> {
         return Err(Error::InvalidRequest("an id must not be blank".to_string()));
     }
     let mut seen = std::collections::BTreeSet::new();
-    Ok(ids.into_iter().filter(|id| seen.insert(id.clone())).collect())
+    Ok(ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect())
 }
 
 /// The hits of `found` in the order of `ids`, each once.

@@ -11,8 +11,8 @@ use crate::explore::{
     get_by_listing,
 };
 use crate::item::ItemId;
-use crate::namespace::Reach;
 use crate::item::{StoreItem, StoreReceipt};
+use crate::namespace::Reach;
 use crate::query::{
     EraseReport, EraseRequest, ExportPage, FetchMode, FetchPage, FetchRequest, ForgetReport,
     ForgetTarget, Hit, ListPage, ListRequest, RecallAnswer, RecallRequest,
