@@ -37,6 +37,7 @@ An object-safe `#[async_trait]` trait, `Send + Sync`; hosts hold it as
 | `fetch(FetchRequest) -> Result<FetchPage>` | required | Ranked raw retrieval in one `FetchMode`. |
 | `store(StoreItem) -> Result<StoreReceipt>` | required | Store one item; an identical item is a replay. |
 | `forget(ForgetTarget) -> Result<ForgetReport>` | required | Remove by ids or by a non-empty filter. |
+| `forget_within(Vec<ItemId>, Reach) -> Result<ForgetReport>` | **default** | Remove the ids that lie within the reach, looking nowhere else. `forget_within_by_get`: `get` with the reach (batches of `MAX_GET_IDS`), then `forget` the ids found. An engine whose `forget` by id searches beyond the reach overrides it. No ids or a blank one is `InvalidRequest`. |
 | `list(ListRequest) -> Result<ListPage>` | required | Query-free paging. |
 | `store_many(Vec<StoreItem>) -> Result<Vec<StoreReceipt>>` | **default** | Calls `validate_many`, then `store` one item at a time, in order, stopping at the first error. An engine overrides it to batch. |
 | `explore(ExploreRequest) -> Result<ExplorePage>` | **default** | `explore_by_listing`: pages through `list`. An engine that can aggregate server-side overrides it. |

@@ -190,3 +190,100 @@ async fn forget_by_ids_with_nothing_in_reach_forgets_nothing() {
         .unwrap();
     assert_eq!(result, json!({ "forgotten": 0, "skipped": ["nothing"] }));
 }
+
+/// The reference engine, recording each forget and the reach of each
+/// reach-confined forget.
+struct Recording {
+    inner: ReferenceEngine,
+    forgets: std::sync::Mutex<Vec<ForgetTarget>>,
+    within: std::sync::Mutex<Vec<tinymemory_api::Reach>>,
+}
+
+#[async_trait::async_trait]
+impl MemoryEngine for Recording {
+    fn descriptor(&self) -> &tinymemory_api::EngineDescriptor {
+        self.inner.descriptor()
+    }
+    async fn health(&self) -> tinymemory_api::EngineHealth {
+        self.inner.health().await
+    }
+    async fn recall(
+        &self,
+        req: tinymemory_api::RecallRequest,
+    ) -> tinymemory_api::Result<tinymemory_api::RecallAnswer> {
+        self.inner.recall(req).await
+    }
+    async fn fetch(
+        &self,
+        req: tinymemory_api::FetchRequest,
+    ) -> tinymemory_api::Result<tinymemory_api::FetchPage> {
+        self.inner.fetch(req).await
+    }
+    async fn store(&self, item: StoreItem) -> tinymemory_api::Result<tinymemory_api::StoreReceipt> {
+        self.inner.store(item).await
+    }
+    async fn forget(&self, target: ForgetTarget) -> tinymemory_api::Result<ForgetReport> {
+        self.forgets.lock().unwrap().push(target.clone());
+        self.inner.forget(target).await
+    }
+    async fn forget_within(
+        &self,
+        ids: Vec<ItemId>,
+        reach: tinymemory_api::Reach,
+    ) -> tinymemory_api::Result<ForgetReport> {
+        self.within.lock().unwrap().push(reach.clone());
+        tinymemory_api::forget_within_by_get(self, ids, reach).await
+    }
+    async fn list(&self, req: ListRequest) -> tinymemory_api::Result<tinymemory_api::ListPage> {
+        self.inner.list(req).await
+    }
+}
+
+#[tokio::test]
+async fn a_scoped_forget_by_ids_is_confined_to_the_scopes_reach() {
+    let engine = Recording {
+        inner: ReferenceEngine::new(),
+        forgets: std::sync::Mutex::default(),
+        within: std::sync::Mutex::default(),
+    };
+    let mine = store(
+        &engine,
+        &scope(),
+        &json!({ "learning": { "text": "mine" } }),
+    )
+    .await
+    .unwrap();
+    let reach = tinymemory_api::Reach::exact(Namespace::agent("writer"));
+    let scoped = ToolScope {
+        reach: Some(reach.clone()),
+        ..scope()
+    };
+    let result = forget(&engine, &scoped, &json!({ "ids": [mine["id"]] }))
+        .await
+        .unwrap();
+    assert_eq!(result, json!({ "forgotten": 1, "skipped": [] }));
+    assert_eq!(*engine.within.lock().unwrap(), vec![reach]);
+
+    // Unscoped, the ids go to the plain forget by id.
+    let again = store(
+        &engine,
+        &scope(),
+        &json!({ "learning": { "text": "again" } }),
+    )
+    .await
+    .unwrap();
+    let unscoped = ToolScope::default();
+    forget(&engine, &unscoped, &json!({ "ids": [again["id"]] }))
+        .await
+        .unwrap();
+    assert_eq!(engine.within.lock().unwrap().len(), 1);
+    assert!(
+        engine
+            .forgets
+            .lock()
+            .unwrap()
+            .contains(&ForgetTarget::Ids(vec![ItemId::new(
+                again["id"].as_str().unwrap()
+            )]))
+    );
+}

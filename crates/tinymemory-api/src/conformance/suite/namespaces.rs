@@ -180,6 +180,23 @@ pub(super) async fn namespaces(ctx: &Ctx<'_>) -> Result<()> {
         format!("the namespace facet counted {counts:?}, expected {expected:?}")
     })?;
 
+    // A forget by id confined to agent b's reach leaves everything beyond it.
+    let report = ctx
+        .call(
+            CHECK,
+            ctx.engine.forget_within(
+                vec![a.clone(), scout.clone(), job.clone()],
+                Reach::of(nodes.b.clone()),
+            ),
+        )
+        .await?;
+    ensure(CHECK, report.forgotten == 0, || {
+        format!(
+            "a forget by id within agent b's reach removed {} items beyond it",
+            report.forgotten
+        )
+    })?;
+
     let mut forget = tagged(ctx);
     forget.reach = Some(Reach::exact(nodes.b.clone()));
     let report = ctx
@@ -192,7 +209,9 @@ pub(super) async fn namespaces(ctx: &Ctx<'_>) -> Result<()> {
         )
     })?;
     let left = ids_in(ctx, &Reach::subtree(Namespace::ROOT)).await?;
-    let wanted: BTreeSet<ItemId> = [root, a, scout].into_iter().collect();
+    let wanted: BTreeSet<ItemId> = [root.clone(), a.clone(), scout.clone()]
+        .into_iter()
+        .collect();
     ensure(CHECK, left == wanted, || {
         format!("after forgetting agent b, {left:?} remain")
     })?;
@@ -213,6 +232,27 @@ pub(super) async fn namespaces(ctx: &Ctx<'_>) -> Result<()> {
     let left = ids_in(ctx, &Reach::exact(nodes.job.clone())).await?;
     ensure(CHECK, left.is_empty(), || {
         format!("after forgetting it by id, the service node still holds {left:?}")
+    })?;
+
+    // Within agent a's subtree, the sub-agent's id is found and the root's,
+    // outside it, is not.
+    let report = ctx
+        .call(
+            CHECK,
+            ctx.engine
+                .forget_within(vec![scout, root.clone()], Reach::subtree(nodes.a.clone())),
+        )
+        .await?;
+    ensure(CHECK, report.forgotten == 1, || {
+        format!(
+            "a forget by id within agent a's subtree removed {} items",
+            report.forgotten
+        )
+    })?;
+    let left = ids_in(ctx, &Reach::subtree(Namespace::ROOT)).await?;
+    let wanted: BTreeSet<ItemId> = [root, a].into_iter().collect();
+    ensure(CHECK, left == wanted, || {
+        format!("after forgetting within agent a's subtree, {left:?} remain")
     })
 }
 

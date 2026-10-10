@@ -129,7 +129,8 @@ packs, brain reads, holistic recall and "search everything". Only a reach at
 the service node, or inside it, reads it. No reach at all (`MetaFilter::reach`
 or `GetRequest::reach` left `None`) reads as `Reach::subtree(Namespace::ROOT)`
 (`Reach::admitted_by`), so it skips sandboxes too. Ids are the exception:
-`ForgetTarget::Ids` forgets an item wherever it lives.
+`ForgetTarget::Ids` forgets an item wherever it lives (`forget_within` does
+not: it looks only inside its reach).
 
 | Constructor | `inherit` | `descendants` | Sees |
 | --- | --- | --- | --- |
@@ -219,9 +220,13 @@ company's own items but nothing from `team:other`.
 | `get` | `GetRequest::reach` leaves out ids outside it, as if they named nothing. |
 | `forget` by filter | `filter.reach` confines what is removed. |
 | `forget` by ids | **Not scoped.** The ids are removed wherever they live. |
+| `forget_within` | The reach confines both the ids removed and where the engine looks for them. |
 
-Because forget by ids is unscoped, a caller confined to a reach must first
-`get` the ids under its reach and forget only the ids that came back. A
+Because forget by ids is unscoped, a caller confined to a reach forgets with
+`forget_within(ids, reach)`: an id outside the reach is left alone, and the
+engine reads no node outside it while looking (a `get` under the reach
+followed by `ForgetTarget::Ids` removes the same items, but the engine may
+then look for them in every node it holds). A
 filter whose only field is a `reach` is non-empty, so it is a valid forget
 target meaning "everything in reach".
 
@@ -231,8 +236,8 @@ the root; use `Reach::exact` to confine removal to the agent's own node.
 
 `MetaFilter::matches` applies the reach to the item's namespace like any
 other field, and every engine must agree: the conformance `namespaces` check
-covers reaches, `get`, `fetch`, the namespace facet and a forget scoped to one
-node.
+covers reaches, `get`, `fetch`, the namespace facet, a forget scoped to one
+node and a forget by id within a reach.
 
 ## How tools pin it
 

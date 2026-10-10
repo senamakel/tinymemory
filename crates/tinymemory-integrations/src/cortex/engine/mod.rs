@@ -35,8 +35,9 @@ use async_trait::async_trait;
 use tinymemory_api::{
     BeliefsRequest, ConsolidateReceipt, ConsolidateRequest, Consolidation, EngineDescriptor,
     EngineHealth, EraseReport, EraseRequest, ExplorePage, ExploreRequest, ExportPage, FetchPage,
-    FetchRequest, ForgetReport, ForgetTarget, GetRequest, Hit, ListPage, ListRequest, MemoryEngine,
-    RecallAnswer, RecallRequest, StoreItem, StoreReceipt, WaitFor, WriteOptions,
+    FetchRequest, ForgetReport, ForgetTarget, GetRequest, Hit, ItemId, ListPage, ListRequest,
+    MemoryEngine, Reach, RecallAnswer, RecallRequest, StoreItem, StoreReceipt, WaitFor,
+    WriteOptions,
 };
 
 use crate::cortex::credential::{BearerSource, CortexCredential};
@@ -438,6 +439,12 @@ impl MemoryEngine for CortexEngine {
         self.forget_items(target).await
     }
 
+    /// By the ids' labels in the scopes the reach admits only, never a
+    /// listing of the whole tree.
+    async fn forget_within(&self, ids: Vec<ItemId>, reach: Reach) -> Result<ForgetReport> {
+        self.forget_items_within(ids, reach).await
+    }
+
     async fn list(&self, req: ListRequest) -> Result<ListPage> {
         self.list_page(req).await
     }
@@ -523,3 +530,7 @@ mod test_support;
 #[cfg(test)]
 #[path = "mod_retired_root_tests.rs"]
 mod retired_root_tests;
+
+#[cfg(test)]
+#[path = "mod_forget_within_tests.rs"]
+mod forget_within_tests;

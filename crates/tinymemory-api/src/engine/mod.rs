@@ -6,8 +6,13 @@ use serde::Serialize;
 
 use crate::consolidate::{BeliefsRequest, ConsolidateReceipt, ConsolidateRequest, Consolidation};
 use crate::error::{Error, Result};
-use crate::explore::{ExplorePage, ExploreRequest, GetRequest, explore_by_listing, get_by_listing};
+use crate::explore::{
+    ExplorePage, ExploreRequest, GetRequest, explore_by_listing, forget_within_by_get,
+    get_by_listing,
+};
+use crate::item::ItemId;
 use crate::item::{StoreItem, StoreReceipt};
+use crate::namespace::Reach;
 use crate::query::{
     EraseReport, EraseRequest, ExportPage, FetchMode, FetchPage, FetchRequest, ForgetReport,
     ForgetTarget, Hit, ListPage, ListRequest, RecallAnswer, RecallRequest,
@@ -118,6 +123,25 @@ pub trait MemoryEngine: Send + Sync {
     ///
     /// An empty target, and the engine's own failures.
     async fn forget(&self, target: ForgetTarget) -> Result<ForgetReport>;
+
+    /// Removes the items `ids` name that lie within `reach`, and looks for
+    /// them nowhere else: unlike [`ForgetTarget::Ids`], which finds an id
+    /// wherever it lives, an id outside the reach is left alone as if it
+    /// named nothing, and the engine reads no node the reach does not admit
+    /// while looking. A host confining a caller to its own subtree forgets
+    /// by id this way, so the lookup never touches another tree.
+    ///
+    /// The default reads the ids back with [`MemoryEngine::get`] and the
+    /// reach, then forgets what came back ([`forget_within_by_get`]); an
+    /// engine whose `forget` by id searches beyond the reach overrides it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidRequest`] for no ids or a blank one, and the engine's
+    /// own failures.
+    async fn forget_within(&self, ids: Vec<ItemId>, reach: Reach) -> Result<ForgetReport> {
+        forget_within_by_get(self, ids, reach).await
+    }
 
     /// Pages through stored items.
     ///
