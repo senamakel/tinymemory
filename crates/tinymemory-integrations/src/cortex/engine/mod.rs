@@ -438,6 +438,12 @@ impl MemoryEngine for CortexEngine {
         self.forget_items(target).await
     }
 
+    /// By the ids' labels in the scopes the reach admits only, never a
+    /// listing of the whole tree.
+    async fn forget_within(&self, ids: Vec<ItemId>, reach: Reach) -> Result<ForgetReport> {
+        self.forget_items_within(ids, reach).await
+    }
+
     async fn list(&self, req: ListRequest) -> Result<ListPage> {
         self.list_page(req).await
     }
