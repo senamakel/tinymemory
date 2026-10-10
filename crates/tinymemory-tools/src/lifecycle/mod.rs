@@ -87,7 +87,6 @@ use crate::brain::Brain;
 use crate::layout::{CoreScope, MemoryLayout};
 use crate::recall::{
     ContextPack, HolisticRecall, LateHint, ScopeSection, SectionQuery, ThreadWindow,
-    holistic_recall,
 };
 use crate::tools::MemoryTools;
 
@@ -428,7 +427,13 @@ impl AgentMemory {
         request.exclude_thread = Some(window);
         let (logged, pack) = join(
             self.engine.store_with(item, WriteOptions::accepted()),
-            crate::recall::run(self.engine.as_ref(), &request, None, hint),
+            crate::recall::run(
+                self.engine.as_ref(),
+                &request,
+                None,
+                hint,
+                self.team_exclusion(&request),
+            ),
         )
         .await;
         let pack = pack?;
@@ -525,7 +530,6 @@ impl AgentMemory {
                 fallback_to_fetch: true,
             },
             max_scopes: None,
-            exclude_agent_id: None,
         };
         let mut sections = vec![summary];
         sections.extend(self.standard_sections());
@@ -615,11 +619,6 @@ impl AgentMemory {
             .filter(|(_, _, limit, _)| *limit > 0)
             .map(|(heading, filter, limit, max_scopes)| {
                 let section = ScopeSection::fetch(heading, filter, limit);
-                let section = if heading == TEAM_HEADING {
-                    section.excluding_agent(self.agent_id.clone())
-                } else {
-                    section
-                };
                 match max_scopes {
                     Some(scopes) => section.with_max_scopes(scopes),
                     None => section,
@@ -636,12 +635,34 @@ impl AgentMemory {
         }
     }
 
+    /// The team section is the last section with its heading and shared
+    /// conversation filter; only lifecycle recall applies this exclusion.
+    fn team_exclusion<'a>(&'a self, request: &HolisticRecall) -> Option<(usize, &'a str)> {
+        if self.policy.team_limit == 0 {
+            return None;
+        }
+        let team_filter = self.layout.conversations_filter(None);
+        request
+            .sections
+            .iter()
+            .rposition(|section| section.heading == TEAM_HEADING && section.filter == team_filter)
+            .map(|index| (index, self.agent_id.as_str()))
+    }
+
     async fn read(
         &self,
         query: Option<String>,
         sections: Vec<ScopeSection>,
     ) -> Result<ContextPack> {
-        holistic_recall(self.engine.as_ref(), &self.request(query, sections)).await
+        let request = self.request(query, sections);
+        crate::recall::run(
+            self.engine.as_ref(),
+            &request,
+            None,
+            None,
+            self.team_exclusion(&request),
+        )
+        .await
     }
 
     /// One turn of `thread_id` as a one-turn conversation at this agent's

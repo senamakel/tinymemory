@@ -7,9 +7,9 @@ without changing the stored fixture data. It is a mirror inside TinyMemory;
 there is no dependency on `openhuman-core`.
 
 Use `--layout v3 --team-limit 3` to measure cross-agent recall from pooled
-chats on CortexDB's per-person scope tree. The default host mirror keeps
-OpenHuman's current `team_limit = 0`; the JSON report records the layout and
-team limit so those runs cannot be mistaken for the default profile.
+chats on CortexDB's per-person scope tree. The host mirror defaults to
+`team_limit = 0` for historical comparison; the JSON report records the layout
+and team limit so those runs cannot be mistaken for the new OpenHuman default.
 
 ## V3 pooled team recall, 2026-10-10
 
@@ -45,7 +45,7 @@ Update them when the host's defaults or hook behavior changes.
 
 | Behavior | Eval mirror | OpenHuman source |
 | --- | --- | --- |
-| 1200-token budget, 8 learnings, 6 brain, 6 history, 0 team, beliefs every 10 turns | `main.rs`, OpenHuman policy | `crates/openhuman-core/src/config/schema/memory.rs:278-336` |
+| 1200-token budget, 8 learnings, 6 brain, 6 history, 3 team, beliefs every 10 turns | `main.rs`, OpenHuman policy with `--team-limit 3` | `crates/openhuman-core/src/config/schema/memory.rs:278-336` |
 | Plain `pre_turn` by default, resumed hook after compaction, optional dated path with `--date-hint`, empty pack after 5000 ms | `agent.rs`, `HostHook` | `crates/openhuman-core/src/config/schema/memory.rs` and `crates/openhuman-core/src/memory/lifecycle/hooks.rs` |
 | Timed-out task continues in the background and can still log the turn | `agent.rs`, `ScriptedAgent::flush` | `crates/openhuman-core/src/memory/lifecycle/hooks.rs:190-225` |
 | Identical pending belief builds run once | `main.rs`, `coalesce_builds` | `crates/openhuman-core/src/memory/lifecycle/jobs.rs`, `enqueue` |

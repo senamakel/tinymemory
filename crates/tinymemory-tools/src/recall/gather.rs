@@ -91,14 +91,12 @@ pub(super) async fn section(
     section: &ScopeSection,
     beliefs: usize,
     dated: bool,
+    excluded_agent: Option<&str>,
 ) -> Gathered {
     let section_started = Instant::now();
     let keep = |hit: &Hit| {
         !request.excludes(hit)
-            && section
-                .exclude_agent_id
-                .as_deref()
-                .is_none_or(|agent| hit.meta.agent_id.as_deref() != Some(agent))
+            && excluded_agent.is_none_or(|agent| hit.meta.agent_id.as_deref() != Some(agent))
     };
     let want = wanted(request, section);
     // A date reorders a fetch section's hits after the read, so read deeper
@@ -490,6 +488,7 @@ pub(super) fn settle(
     request: &HolisticRecall,
     section: &ScopeSection,
     gathered: Gathered,
+    excluded_agent: Option<&str>,
     shown: &mut HashSet<ItemId>,
 ) -> Settled {
     let hits = match gathered {
@@ -503,10 +502,7 @@ pub(super) fn settle(
         .filter(|hit| kinds.is_empty() || kinds.contains(&hit.kind))
         .filter(|hit| !request.excludes(hit) && !shown.contains(&hit.id))
         .filter(|hit| {
-            section
-                .exclude_agent_id
-                .as_deref()
-                .is_none_or(|agent| hit.meta.agent_id.as_deref() != Some(agent))
+            excluded_agent.is_none_or(|agent| hit.meta.agent_id.as_deref() != Some(agent))
         })
         .take(section.limit)
         .collect();
