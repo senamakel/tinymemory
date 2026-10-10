@@ -246,11 +246,18 @@ async fn a_scoped_forget_by_ids_is_confined_to_the_scopes_reach() {
         forgets: std::sync::Mutex::default(),
         within: std::sync::Mutex::default(),
     };
-    let mine = store(&engine, &scope(), &json!({ "learning": { "text": "mine" } }))
-        .await
-        .unwrap();
+    let mine = store(
+        &engine,
+        &scope(),
+        &json!({ "learning": { "text": "mine" } }),
+    )
+    .await
+    .unwrap();
     let reach = tinymemory_api::Reach::exact(Namespace::agent("writer"));
-    let scoped = scope().with_reach(reach.clone());
+    let scoped = ToolScope {
+        reach: Some(reach.clone()),
+        ..scope()
+    };
     let result = forget(&engine, &scoped, &json!({ "ids": [mine["id"]] }))
         .await
         .unwrap();
@@ -258,9 +265,13 @@ async fn a_scoped_forget_by_ids_is_confined_to_the_scopes_reach() {
     assert_eq!(*engine.within.lock().unwrap(), vec![reach]);
 
     // Unscoped, the ids go to the plain forget by id.
-    let again = store(&engine, &scope(), &json!({ "learning": { "text": "again" } }))
-        .await
-        .unwrap();
+    let again = store(
+        &engine,
+        &scope(),
+        &json!({ "learning": { "text": "again" } }),
+    )
+    .await
+    .unwrap();
     let unscoped = ToolScope::default();
     forget(&engine, &unscoped, &json!({ "ids": [again["id"]] }))
         .await
