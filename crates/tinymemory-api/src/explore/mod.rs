@@ -402,6 +402,55 @@ pub async fn get_by_listing<E: MemoryEngine + ?Sized>(
     Ok(in_request_order(&req.ids, found))
 }
 
+/// [`crate::MemoryEngine::forget_within`] by reading the ids back with
+/// [`crate::MemoryEngine::get`] and `reach` (in batches of [`MAX_GET_IDS`]),
+/// then forgetting only what came back: the default every engine gets. An id
+/// outside the reach, or naming nothing, is not counted. Correct for any
+/// engine; confined to the reach as long as the engine's own `forget` by id
+/// reads only where the ids it is given live.
+///
+/// # Errors
+///
+/// [`Error::InvalidRequest`] for no ids or a blank one, and the engine's own
+/// `get` and `forget` failures.
+pub async fn forget_within_by_get<E: MemoryEngine + ?Sized>(
+    engine: &E,
+    ids: Vec<ItemId>,
+    reach: Reach,
+) -> Result<ForgetReport> {
+    let ids = forget_within_ids(ids)?;
+    let mut found = Vec::new();
+    for batch in ids.chunks(MAX_GET_IDS) {
+        let hits = engine
+            .get(GetRequest {
+                ids: batch.to_vec(),
+                reach: Some(reach.clone()),
+            })
+            .await?;
+        found.extend(hits.into_iter().map(|hit| hit.id));
+    }
+    if found.is_empty() {
+        return Ok(ForgetReport::default());
+    }
+    engine.forget(ForgetTarget::Ids(found)).await
+}
+
+/// The ids of a [`crate::MemoryEngine::forget_within`] call, each once in
+/// the order first named, checked as [`ForgetTarget::validate`] and
+/// [`GetRequest::validate`] check theirs.
+///
+/// # Errors
+///
+/// [`Error::InvalidRequest`] for no ids or a blank one.
+pub fn forget_within_ids(ids: Vec<ItemId>) -> Result<Vec<ItemId>> {
+    ForgetTarget::Ids(ids.clone()).validate()?;
+    if ids.iter().any(|id| id.as_str().trim().is_empty()) {
+        return Err(Error::InvalidRequest("an id must not be blank".to_string()));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    Ok(ids.into_iter().filter(|id| seen.insert(id.clone())).collect())
+}
+
 /// The hits of `found` in the order of `ids`, each once.
 #[must_use]
 pub fn in_request_order(ids: &[ItemId], mut found: BTreeMap<ItemId, Hit>) -> Vec<Hit> {
