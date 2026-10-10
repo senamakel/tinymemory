@@ -262,7 +262,7 @@ impl StoreItem {
     }
 
     /// A stable hex digest of the whole item, metadata included, except
-    /// `meta.observed_at` and `meta.observed_actor`.
+    /// `meta.observed_at`, `meta.observed_actor` and `meta.tool_call.id`.
     ///
     /// Two items with the same fingerprint are the same item: an engine
     /// derives its idempotency from this, so an identical retry is a replay.
@@ -277,6 +277,12 @@ impl StoreItem {
         let mut identity = self.clone();
         identity.meta_mut().observed_at = None;
         identity.meta_mut().observed_actor = None;
+        // The provider assigns a fresh invocation id on every call. It is
+        // provenance, not learning content: retrying a successful write must
+        // replay the same item even when the model issues a new tool call.
+        if let Some(call) = identity.meta_mut().tool_call.as_mut() {
+            call.id = None;
+        }
         // Serialising a struct cannot fail: every field is a plain string,
         // number, enum or timestamp. The fallback keeps the function total.
         let bytes =

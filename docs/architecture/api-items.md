@@ -112,7 +112,7 @@ enforce (`Namespace` is checked when parsed).
 
 `fingerprint()` is a stable 40-character lowercase hex string: the first 20
 bytes of the SHA-256 of the item's JSON serialisation, with
-`meta.observed_at` and `meta.observed_actor` cleared first. It covers **everything else**: kind, text,
+`meta.observed_at`, `meta.observed_actor` and `meta.tool_call.id` cleared first. It covers **everything else**: kind, text,
 title, turns, learning kind, confidence, evidence, and every metadata field
 including `namespace` (a root namespace is not serialised, so root items hash
 as they did before namespaces existed).
@@ -123,6 +123,11 @@ learning, or an unchanged file re-synced, into a new item each time.
 `observed_actor` says *who* said it, which an engine sends only with
 attribution on; hashing it would store the same email again once that is
 turned on.
+
+`meta.tool_call.id` identifies a provider invocation, so a new call that retries
+the same learning must not create a duplicate. The tool name still participates
+in identity, and the stored metadata retains the original invocation id. Tool
+calls inside conversation turns remain part of the conversation's content.
 
 Two items with the same fingerprint are the same item. Engines derive
 idempotency from it: the reference engine uses the fingerprint as the item id.
