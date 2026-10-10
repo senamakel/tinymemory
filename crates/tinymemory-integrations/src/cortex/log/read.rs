@@ -6,7 +6,7 @@ use reqwest::Method;
 use serde_json::Value;
 
 use super::{Log, MAX_PAGES, PAGE_SIZE};
-use crate::cortex::descriptor::{CortexWire, Route};
+use crate::cortex::descriptor::Route;
 use crate::cortex::error::{Error, Result};
 use crate::cortex::transport::{Attempts, urlencode};
 
@@ -172,26 +172,20 @@ impl Log {
         // backend bounds an unprefixed listing to the caller's tenant, and
         // refuses an empty one.
         //
-        // Direct, a non-empty prefix is sent terminated by the separator
-        // (`user:ann/`), so a backend matching plain string prefixes cannot
-        // answer a sibling whose name merely starts the same way
-        // (`user:anna`). No scope is ever the bare node path (a scope always
-        // ends in a kind leaf), so nothing is lost. The hosted route's grammar
-        // is `type:id` segments and refuses a trailing separator, so it gets
-        // the bare node path and its answer is narrowed by the caller's
-        // namespace parse (`Reach::admits`).
+        // The prefix is sent as the bare node path on both wires: CortexDB
+        // and the hosted route both refuse a separator-terminated one
+        // (`422 INVALID_SCOPE_GRAMMAR: segment N is empty`, measured on the
+        // live server). Both match whole segments; a backend that matched
+        // plain string prefixes would also list a sibling (`user:anna` under
+        // `user:ann`), so the answer is narrowed to whole segments below.
         let wire = self.client.wire();
         let base = wire.path(Route::Scopes);
         let path = if prefix.is_empty() {
             format!("{base}?limit={SCOPES_LIMIT}")
         } else {
-            let terminated = match wire {
-                CortexWire::Direct if !prefix.ends_with('/') => format!("{prefix}/"),
-                _ => prefix.to_string(),
-            };
             format!(
                 "{base}?prefix={prefix}&limit={SCOPES_LIMIT}",
-                prefix = urlencode(&terminated),
+                prefix = urlencode(prefix),
             )
         };
         let listed = match self
@@ -215,8 +209,9 @@ impl Log {
             .filter_map(|item| {
                 item.as_str()
                     .or_else(|| item.get("path").and_then(Value::as_str))
-                    .map(str::to_owned)
             })
+            .filter(|path| prefix.is_empty() || below_whole_segments(path, prefix))
+            .map(str::to_owned)
             .collect();
         Ok((paths, truncated))
     }
@@ -249,4 +244,15 @@ impl Log {
             )
             .await
     }
+}
+
+/// Whether `path` is `prefix` or below it, matching whole segments: the
+/// prefix may sit behind a tenant prefix the hosted backend adds, but
+/// `user:anna` is never below `user:ann`.
+fn below_whole_segments(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    path == prefix
+        || path.starts_with(&format!("{prefix}/"))
+        || path.contains(&format!("/{prefix}/"))
+        || path.ends_with(&format!("/{prefix}"))
 }

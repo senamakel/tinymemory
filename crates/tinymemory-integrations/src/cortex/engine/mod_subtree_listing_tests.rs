@@ -40,27 +40,21 @@ fn listed_prefixes(state: &Shared, mark: usize) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_direct_listing_ends_its_prefix_with_the_separator_and_a_hosted_one_does_not() {
-    for (index, (engine, state)) in both().await.into_iter().enumerate() {
-        let hosted = index == 1;
+async fn a_listing_sends_the_bare_node_path_on_both_wires() {
+    for (engine, state) in both().await {
         engine.store_many(trees()).await.unwrap();
         let mark = state.requests().len();
 
         engine.log.scopes(ANN).await.unwrap();
 
-        let expected = if hosted {
-            ANN.to_string()
-        } else {
-            format!("{ANN}/")
-        };
-        assert_eq!(listed_prefixes(&state, mark), vec![expected]);
+        // The live server refuses a separator-terminated prefix.
+        assert_eq!(listed_prefixes(&state, mark), vec![ANN.to_string()]);
     }
 }
 
 #[tokio::test]
-async fn a_string_prefix_backend_lists_no_sibling_on_direct() {
-    for (index, (engine, state)) in both().await.into_iter().enumerate() {
-        let hosted = index == 1;
+async fn a_string_prefix_backend_lists_no_sibling_on_either_wire() {
+    for (engine, state) in both().await {
         state.string_prefix_scopes.store(true, Ordering::SeqCst);
         engine.store_many(trees()).await.unwrap();
 
@@ -69,13 +63,23 @@ async fn a_string_prefix_backend_lists_no_sibling_on_direct() {
         assert!(
             listed
                 .iter()
-                .any(|path| path.starts_with("app:tinymemory/user:ann/"))
+                .any(|path| path.starts_with("app:tinymemory/user:ann/")),
+            "{listed:?}"
         );
-        let sibling = listed.iter().any(|path| path.contains("user:anna"));
-        // Direct never asks for the sibling. Hosted cannot terminate its
-        // prefix, so the sibling is answered and dropped by the reach.
-        assert_eq!(sibling, hosted, "{listed:?}");
+        assert!(
+            listed.iter().all(|path| !path.contains("user:anna")),
+            "{listed:?}"
+        );
     }
+}
+
+#[test]
+fn whole_segment_matching_keeps_a_tenant_prefix_and_drops_a_sibling() {
+    use super::super::super::log::below_whole_segments as below;
+    assert!(below("app:tinymemory/user:ann/app:learnings", ANN));
+    assert!(below("org:1/app:tinymemory/user:ann/app:learnings", ANN));
+    assert!(below(ANN, ANN));
+    assert!(!below("app:tinymemory/user:anna/app:learnings", ANN));
 }
 
 #[tokio::test]
