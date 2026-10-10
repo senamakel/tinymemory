@@ -6,8 +6,10 @@ engine and probes as the default profile, so pack accuracy can be compared
 without changing the stored fixture data. It is a mirror inside TinyMemory;
 there is no dependency on `openhuman-core`.
 
-The source references below refer to OpenHuman commit `cf16716f4f`. Update
-them when the host's defaults or hook behavior changes.
+The source references below use OpenHuman commit `cf16716f4f` for the hook
+behavior and [OpenHuman PR #7346](https://github.com/tinyhumansai/openhuman/pull/7346)
+for the 5000 ms default.
+Update them when the host's defaults or hook behavior changes.
 
 | Behavior | Eval mirror | OpenHuman source |
 | --- | --- | --- |
