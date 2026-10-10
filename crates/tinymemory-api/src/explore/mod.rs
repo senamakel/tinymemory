@@ -14,6 +14,8 @@
 //! can aggregate server-side overrides `explore`; every other engine gets
 //! [`explore_by_listing`], which pages through `list` up to
 //! [`ExploreRequest::scan_limit`] items and reports whether it stopped early.
+//! Likewise [`get_by_listing`] is the default `get`, and
+//! [`forget_within_by_get`] the default reach-confined forget by id.
 
 use std::collections::BTreeMap;
 
@@ -24,7 +26,7 @@ use crate::error::{Error, Result};
 use crate::item::{ItemId, ItemKind};
 use crate::meta::{MemoryMeta, MetaFilter, SourceKind};
 use crate::namespace::{Namespace, Reach};
-use crate::query::{Hit, ListRequest};
+use crate::query::{ForgetReport, ForgetTarget, Hit, ListRequest};
 
 /// Most buckets one [`ExplorePage`] may return.
 pub const MAX_BUCKETS: usize = 500;
