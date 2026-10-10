@@ -8,6 +8,7 @@
 #   MODELS=openrouter ./scripts/memory-eval.sh   # real models via OpenRouter
 #   ./scripts/memory-eval.sh --llm           # extra flags go to the eval
 #   KEEP=1 ./scripts/memory-eval.sh          # leave the server running
+#   REUSE_IMAGE=1 ./scripts/memory-eval.sh   # use an already-built image
 #   CORTEX_FLAGS_FILE=$PWD/integration/cortexdb/flags/no-graph.env \
 #     ./scripts/memory-eval.sh               # one CortexDB flag profile
 #
@@ -65,7 +66,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"${compose[@]}" up -d --build --wait mock-inference >/dev/null
+if [ -n "${REUSE_IMAGE:-}" ]; then
+  "${compose[@]}" up -d --no-build --wait mock-inference >/dev/null
+else
+  "${compose[@]}" up -d --build --wait mock-inference >/dev/null
+fi
 "${compose[@]}" up -d cortex >/dev/null
 for _ in $(seq 1 120); do
   if curl --fail --silent "$url/v1/admin/ready" >/dev/null; then

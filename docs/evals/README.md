@@ -8,6 +8,7 @@ measure how well that behaviour serves an agent.
 | --- | --- | --- |
 | [Agent memory](agent-memory.md) | The lifecycle (`pre_turn`, `post_turn`, `start_session`, compaction, belief builds) across twelve scenarios | 2026-10-04, CortexDB v0.10.4 |
 | [CortexDB flags](cortex-flags.md) | Whether CortexDB's server flags move accuracy, learning, surprise, conflicts, cost and latency | 2026-10-04, CortexDB v0.10.4 |
+| [OpenHuman host profile](openhuman-host.md) | OpenHuman turn deadline, logging parity and a 500-turn recall loop guard | 2026-10-10, reference and CortexDB |
 
 ## The agent memory eval
 
@@ -24,6 +25,7 @@ The harness is the `memory_eval` example in
 | `compare.rs` | `memory_eval compare`: the KPIs of several runs against a baseline |
 | `inspect.rs` | Reads CortexDB's derived layers (facts, beliefs, conflicts) and model usage straight off the wire |
 | `llm.rs` | The optional model that answers each probe from its pack (`--llm`) |
+| `loop_guard.rs` | Replays the JSON-scripted 500-turn pack echo probe (`--loop-guard`) |
 
 ### Running it
 
@@ -64,10 +66,13 @@ and the run stops at the settle step with "only 0 of N writes visible".
 
 The script prints the report and writes `target/memory-eval/<label>.md` and
 `.json`. The JSON holds every probe's pack, so a miss can be read in full,
-and the run's KPIs.
+and the run's KPIs. Set `REUSE_IMAGE=1` to reuse an already-built local eval
+image when Docker Hub is unavailable; the default builds it from the compose
+file.
 
 Flags (after `--`): `--engine reference|cortex|tinyhumans`, `--only <scenario>`,
-`--enrich-wait <secs>`, `--json <path>`, `--label <name>` and `--llm`. With
+`--enrich-wait <secs>`, `--json <path>`, `--label <name>`, `--llm`,
+`--host openhuman` and `--loop-guard`. With
 `CORTEX_DB_KEEP=1` the run's data is left in place for inspection.
 
 ### How a scenario runs

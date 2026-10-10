@@ -44,6 +44,10 @@
 //! - `--label <name>`: name the run in the report.
 //! - `--llm`: also have a model answer every probe from its pack (see
 //!   `llm`).
+//! - `--host openhuman`: run scripted turns through OpenHuman's dated
+//!   pre-turn hook with its 1500 ms deadline, policy and logged tool results.
+//! - `--loop-guard`: replay a JSON-scripted 500-turn thread and inspect all
+//!   stored items for an injected `<memory-context>` tag.
 //!
 //! `memory_eval compare <run.json>…` compares the reports of several runs
 //! instead (see `compare`). A run records the CortexDB flag profile it ran
@@ -58,6 +62,7 @@ mod compare;
 mod inspect;
 mod kpi;
 mod llm;
+mod loop_guard;
 mod scenarios;
 mod score;
 
@@ -81,7 +86,7 @@ use tinymemory_tools::{
     MemoryLayout, PreTurn, RecallPolicy, SessionStart,
 };
 
-use agent::{ScriptedAgent, ms};
+use agent::{PRE_TURN_TIMEOUT, ScriptedAgent, ms};
 use inspect::{Captured, Derived, Inspector, Usage};
 use llm::Llm;
 use scenarios::{MAIN, Probe, Scenario, Step, Via};
@@ -111,6 +116,8 @@ struct Args {
     json: Option<String>,
     label: String,
     llm: bool,
+    host: String,
+    loop_guard: bool,
 }
 
 fn args() -> Result<Args, Error> {
@@ -125,6 +132,8 @@ fn args() -> Result<Args, Error> {
         json: None,
         label: String::new(),
         llm: false,
+        host: "scripted".into(),
+        loop_guard: false,
     };
     let mut raw = std::env::args().skip(1);
     while let Some(flag) = raw.next() {
@@ -136,8 +145,16 @@ fn args() -> Result<Args, Error> {
             "--json" => parsed.json = Some(value()?),
             "--label" => parsed.label = value()?,
             "--llm" => parsed.llm = true,
+            "--host" => parsed.host = value()?,
+            "--loop-guard" => parsed.loop_guard = true,
             other => return Err(format!("unknown flag {other}").into()),
         }
+    }
+    if !matches!(parsed.host.as_str(), "scripted" | "openhuman") {
+        return Err(format!("unknown host {}", parsed.host).into());
+    }
+    if parsed.loop_guard && parsed.host != "openhuman" {
+        return Err("--loop-guard requires --host openhuman".into());
     }
     if parsed.label.is_empty() {
         parsed.label = parsed.engine.clone();
@@ -176,6 +193,7 @@ struct ScenarioReport {
     about: &'static str,
     writes: usize,
     tool_calls: usize,
+    pre_turn_timeouts: usize,
     settle_ms: f64,
     synthesis: Synthesis,
     probes: Vec<ProbeResult>,
@@ -263,6 +281,17 @@ async fn main() -> Result<(), Error> {
         llm.as_ref().map_or("none", |llm| llm.model.as_str()),
     );
 
+    let policy = if args.host == "openhuman" {
+        RecallPolicy {
+            team_limit: 0,
+            ..RecallPolicy::default()
+        }
+    } else {
+        RecallPolicy {
+            build_beliefs_every: Some(4),
+            ..RecallPolicy::default()
+        }
+    };
     let eval = Eval {
         engine: engine.clone(),
         inspector,
@@ -270,10 +299,8 @@ async fn main() -> Result<(), Error> {
         llm,
         run,
         enrich_wait,
-        policy: RecallPolicy {
-            build_beliefs_every: Some(4),
-            ..RecallPolicy::default()
-        },
+        policy,
+        openhuman: args.host == "openhuman",
     };
     let usage_before = match &eval.inspector {
         Some(inspector) => Some(inspector.usage().await?),
@@ -303,6 +330,16 @@ async fn main() -> Result<(), Error> {
         reports.push(report);
     }
 
+    let loop_guard = if args.loop_guard {
+        let report = loop_guard::run(engine.clone(), run, &eval.policy).await?;
+        println!(
+            "\n## Loop guard\n\n```json\n{}\n```",
+            serde_json::to_string_pretty(&report)?
+        );
+        Some(report)
+    } else {
+        None
+    };
     print_summary(&args.label, &reports, &timings);
     let usage = match (&eval.inspector, usage_before) {
         (Some(inspector), Some(before)) => Some(inspector.usage().await?.since(&before)),
@@ -341,14 +378,22 @@ async fn main() -> Result<(), Error> {
             "flags": flags,
             "server": server,
             "engine": engine.descriptor().id,
+            "host": args.host,
             "run": run,
             "scenarios": reports,
+            "loop_guard": loop_guard,
             "timings": timings,
             "usage": usage,
             "kpis": kpis,
         });
         std::fs::write(path, serde_json::to_string_pretty(&out)?)?;
         println!("\nwrote {path}");
+    }
+    if loop_guard
+        .as_ref()
+        .is_some_and(|report| report.echoed_items > 0)
+    {
+        return Err("loop guard found injected pack text in stored items".into());
     }
     Ok(())
 }
@@ -387,6 +432,7 @@ struct Eval {
     run: u64,
     enrich_wait: u64,
     policy: RecallPolicy,
+    openhuman: bool,
 }
 
 impl Eval {
@@ -416,6 +462,7 @@ impl Eval {
         let mut jobs: Vec<BackgroundJob> = Vec::new();
         let mut writes: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut tool_calls = 0;
+        let mut pre_turn_timeouts = 0;
         for step in &scenario.steps {
             match step {
                 Step::Doc {
@@ -457,17 +504,24 @@ impl Eval {
                 } => {
                     let mut scripted = ScriptedAgent::new(memory(tenant, agent)?, thread, WINDOW)
                         .at(epoch + chrono::Duration::days(*day));
+                    if self.openhuman {
+                        scripted = scripted.openhuman();
+                    }
                     for (text, tools) in turns {
                         let record = scripted.user(text, tools).await?;
                         timings.add("pre_turn (log + recall)", record.pre_ms);
                         timings.add("post_turn (log)", record.post_ms);
-                        if !record.logged {
+                        pre_turn_timeouts += usize::from(record.timed_out);
+                        if record.timed_out {
+                            println!("   ! pre_turn timed out on {thread}");
+                        } else if !record.logged {
                             println!("   ! a turn of {thread} was not logged");
                         }
                         tool_calls += record.tool_calls;
                         jobs.extend(record.jobs);
-                        *writes.entry(tenant).or_default() += 2;
+                        *writes.entry(tenant).or_default() += 1 + usize::from(record.logged);
                     }
+                    *writes.entry(tenant).or_default() += scripted.flush().await?;
                 }
             }
         }
@@ -610,6 +664,7 @@ impl Eval {
             about: scenario.about,
             writes: writes.values().sum(),
             tool_calls,
+            pre_turn_timeouts,
             settle_ms,
             synthesis,
             probes,
@@ -662,15 +717,20 @@ impl Eval {
         )?
         .with_policy(policy.clone());
         let started = Instant::now();
+        let mut timed_out = false;
+        let mut host_elapsed = None;
         let (markdown, tokens) = match &probe.via {
             Via::Ask => {
                 let thread = format!("probe-{}", probe.id);
-                pack(
-                    memory
-                        .pre_turn(PreTurn::new(thread, 0, probe.question))
-                        .await?
-                        .pack,
-                )
+                let pre = PreTurn::new(thread, 0, probe.question);
+                if self.openhuman {
+                    let (pack, timeout, elapsed) = host_probe_pack(memory.clone(), pre).await?;
+                    timed_out = timeout;
+                    host_elapsed = Some(elapsed);
+                    pack
+                } else {
+                    pack(memory.pre_turn(pre).await?.pack)
+                }
             }
             Via::Resume { thread, focus } => pack(
                 memory
@@ -699,7 +759,14 @@ impl Eval {
             } => {
                 let mut pre = PreTurn::new(*thread, *turn_index, probe.question);
                 pre.in_prompt_from = *in_prompt_from;
-                pack(memory.pre_turn(pre).await?.pack)
+                if self.openhuman {
+                    let (pack, timeout, elapsed) = host_probe_pack(memory.clone(), pre).await?;
+                    timed_out = timeout;
+                    host_elapsed = Some(elapsed);
+                    pack
+                } else {
+                    pack(memory.pre_turn(pre).await?.pack)
+                }
             }
             Via::ContextDoc { heading } => {
                 let root = layout(run, scenario.name, probe.tenant)?.root().clone();
@@ -712,8 +779,9 @@ impl Eval {
                 (doc.markdown, doc.tokens)
             }
         };
-        let elapsed = ms(started);
+        let elapsed = host_elapsed.unwrap_or_else(|| ms(started));
         let mut result = score(scenario.name, phase, probe, &markdown, tokens, elapsed);
+        result.timed_out = timed_out;
         if let Some(llm) = llm {
             let answer = llm.answer(&markdown, probe.question).await?;
             result.llm_ok = grade(probe, Some(&answer.text));
@@ -729,6 +797,25 @@ impl Eval {
 /// A pack's markdown and token count.
 fn pack(pack: ContextPack) -> (String, usize) {
     (pack.markdown, pack.tokens)
+}
+
+/// Run a probe's pre-turn under the host deadline. A timed-out task still
+/// finishes its write, but its pack is absent from the simulated prompt.
+async fn host_probe_pack(
+    memory: AgentMemory,
+    pre: PreTurn,
+) -> Result<((String, usize), bool, f64), Error> {
+    let started = Instant::now();
+    let mut task =
+        tokio::spawn(async move { memory.pre_turn_dated(pre, false, async { None }).await });
+    match tokio::time::timeout(PRE_TURN_TIMEOUT, &mut task).await {
+        Ok(context) => Ok((pack(context??.pack), false, ms(started))),
+        Err(_) => {
+            let elapsed = ms(started);
+            task.await??;
+            Ok(((String::new(), 0), true, elapsed))
+        }
+    }
 }
 
 /// One accuracy row.
@@ -785,13 +872,13 @@ fn print_summary(label: &str, reports: &[ScenarioReport], timings: &Timings) {
     }
 
     println!("\n## Latency (ms)\n");
-    println!("| Step | n | p50 | p95 | max |");
-    println!("| --- | --- | --- | --- | --- |");
+    println!("| Step | n | p50 | p95 | p99 | max |");
+    println!("| --- | --- | --- | --- | --- | --- |");
     for (step, samples) in &timings.0 {
         let l = Latency::of(samples);
         println!(
-            "| {step} | {} | {:.1} | {:.1} | {:.1} |",
-            l.n, l.p50, l.p95, l.max
+            "| {step} | {} | {:.1} | {:.1} | {:.1} | {:.1} |",
+            l.n, l.p50, l.p95, l.p99, l.max
         );
     }
 
@@ -802,9 +889,10 @@ fn print_summary(label: &str, reports: &[ScenarioReport], timings: &Timings) {
             || p.llm_ok == Some(false)
             || p.leak
             || p.stale_first
+            || p.timed_out
     }) {
         println!(
-            "- {} {}/{} ({}, {}): hit {:?}, rank {:?}, stale first {}, leak {}; extractive {:?}; model {:?}",
+            "- {} {}/{} ({}, {}): hit {:?}, rank {:?}, stale first {}, leak {}, timeout {}; extractive {:?}; model {:?}",
             result.phase,
             result.scenario,
             result.id,
@@ -814,6 +902,7 @@ fn print_summary(label: &str, reports: &[ScenarioReport], timings: &Timings) {
             result.rank,
             result.stale_first,
             result.leak,
+            result.timed_out,
             result
                 .answer
                 .as_deref()

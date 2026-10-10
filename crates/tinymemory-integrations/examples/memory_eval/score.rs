@@ -29,6 +29,8 @@ pub(crate) struct ProbeResult {
     pub(crate) id: &'static str,
     pub(crate) via: &'static str,
     pub(crate) style: &'static str,
+    /// Whether the host deadline expired before this probe received a pack.
+    pub(crate) timed_out: bool,
     /// `None` when the probe expects nothing (a pure leak check).
     pub(crate) hit: Option<bool>,
     pub(crate) rank: Option<usize>,
@@ -122,6 +124,7 @@ pub(crate) fn score(
             Style::Lexical => "lexical",
             Style::Paraphrase => "paraphrase",
         },
+        timed_out: false,
         hit: (!probe.expect.is_empty()).then(|| probe.expect.iter().all(has)),
         rank: expected.map(|at| at + 1),
         section: expected.map(|at| units[at].0.clone()),
@@ -232,6 +235,7 @@ pub(crate) struct Latency {
     pub(crate) n: usize,
     pub(crate) p50: f64,
     pub(crate) p95: f64,
+    pub(crate) p99: f64,
     pub(crate) max: f64,
 }
 
@@ -248,6 +252,7 @@ impl Latency {
             n: sorted.len(),
             p50: at(0.5),
             p95: at(0.95),
+            p99: at(0.99),
             max: sorted[sorted.len() - 1],
         }
     }
