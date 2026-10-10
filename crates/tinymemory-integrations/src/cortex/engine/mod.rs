@@ -534,3 +534,7 @@ mod retired_root_tests;
 #[cfg(test)]
 #[path = "mod_forget_within_tests.rs"]
 mod forget_within_tests;
+
+#[cfg(test)]
+#[path = "mod_subtree_listing_tests.rs"]
+mod subtree_listing_tests;

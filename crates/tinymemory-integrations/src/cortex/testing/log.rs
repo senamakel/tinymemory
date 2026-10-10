@@ -106,12 +106,27 @@ impl CortexLog {
     /// `GET /v1/scopes/list`: every scope holding an event, at or below
     /// `prefix` on a segment boundary, sorted.
     pub(crate) fn scopes(&self, prefix: &str) -> Vec<String> {
-        let below = format!("{prefix}/");
+        self.scopes_matching(prefix, false)
+    }
+
+    /// As [`Self::scopes`]; `string_prefix` matches plain string prefixes
+    /// where `prefix` does not end in the separator. A prefix that does end
+    /// in it names the scopes below it either way.
+    pub(crate) fn scopes_matching(&self, prefix: &str, string_prefix: bool) -> Vec<String> {
+        let below = if string_prefix || prefix.ends_with('/') {
+            prefix.to_string()
+        } else {
+            format!("{prefix}/")
+        };
         let mut scopes: Vec<String> = self
             .events
             .iter()
             .map(|e| str_of(e, "/scope").to_string())
-            .filter(|scope| prefix.is_empty() || scope == prefix || scope.starts_with(&below))
+            .filter(|scope| {
+                prefix.is_empty()
+                    || (!prefix.ends_with('/') && scope == prefix)
+                    || scope.starts_with(&below)
+            })
             .collect();
         scopes.sort();
         scopes.dedup();

@@ -171,7 +171,15 @@ impl Log {
         // An empty prefix (the hosted tenant's own root) sends none: the
         // backend bounds an unprefixed listing to the caller's tenant, and
         // refuses an empty one.
-        let base = self.client.wire().path(Route::Scopes);
+        //
+        // The prefix is sent as the bare node path on both wires: CortexDB
+        // and the hosted route both refuse a separator-terminated one
+        // (`422 INVALID_SCOPE_GRAMMAR: segment N is empty`, measured on the
+        // live server). Both match whole segments; a backend that matched
+        // plain string prefixes would also list a sibling (`user:anna` under
+        // `user:ann`), so the answer is narrowed to whole segments below.
+        let wire = self.client.wire();
+        let base = wire.path(Route::Scopes);
         let path = if prefix.is_empty() {
             format!("{base}?limit={SCOPES_LIMIT}")
         } else {
@@ -201,8 +209,9 @@ impl Log {
             .filter_map(|item| {
                 item.as_str()
                     .or_else(|| item.get("path").and_then(Value::as_str))
-                    .map(str::to_owned)
             })
+            .filter(|path| prefix.is_empty() || below_whole_segments(path, prefix))
+            .map(str::to_owned)
             .collect();
         Ok((paths, truncated))
     }
@@ -235,4 +244,15 @@ impl Log {
             )
             .await
     }
+}
+
+/// Whether `path` is `prefix` or below it, matching whole segments: the
+/// prefix may sit behind a tenant prefix the hosted backend adds, but
+/// `user:anna` is never below `user:ann`.
+pub(crate) fn below_whole_segments(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    path == prefix
+        || path.starts_with(&format!("{prefix}/"))
+        || path.contains(&format!("/{prefix}/"))
+        || path.ends_with(&format!("/{prefix}"))
 }

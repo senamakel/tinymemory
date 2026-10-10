@@ -252,7 +252,12 @@ The reader accepts either `{"items": [{"path": "..."}]}` (Direct) or
 `{"scopes": ["..."]}` (hosted), and for each entry either a bare string or an
 object with `path`. A `404` means "no scope listing" and is treated as no
 scopes. There is no cursor (v0.10.5): `limit` defaults to 50 and is clamped to
-1000, and `prefix` matches whole segments. At 1000 paths a read logs a warning
+1000, and `prefix` matches whole segments. Both wires get the bare node path: CortexDB refuses a
+separator-terminated prefix (`422 INVALID_SCOPE_GRAMMAR`, "segment N is
+empty", measured on the live server). The reader keeps only paths at or below
+the prefix on whole segments (behind a hosted tenant prefix too), so a backend
+matching plain string prefixes could not add `user:anna` to a `user:ann`
+listing. At 1000 paths a read logs a warning
 and an export refuses, since some scopes may be missing.
 
 ### Erase: `v1/erasures` and `memory/v1/erasures`
