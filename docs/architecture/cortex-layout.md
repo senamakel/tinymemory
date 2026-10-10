@@ -45,6 +45,12 @@ org:42/ws:main/app:flows/service:newsletter/app:learnings  a workflow's memory
 org:42/app:flows/service:digest/app:documents            a workflow with no workspace
 ```
 
+The chat scope is shared by the person's agents. Each turn retains its
+`agent_id` in TinyMemory's item metadata. History queries select one agent;
+team queries read the same exact CortexDB scope and discard that agent's
+turns before applying the section limit. Neither query widens to a sibling
+person's `org:` root.
+
 ### The hosted wire: the tenant's root
 
 The TinyHumans backend pins every scope below the caller's tenant root

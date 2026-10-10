@@ -133,6 +133,7 @@ fn holistic(spec: &ContextSpec) -> HolisticRecall {
                     fallback_to_fetch: false,
                 },
                 max_scopes: None,
+                exclude_agent_id: None,
             }
         })
         .collect();

@@ -525,6 +525,7 @@ impl AgentMemory {
                 fallback_to_fetch: true,
             },
             max_scopes: None,
+            exclude_agent_id: None,
         };
         let mut sections = vec![summary];
         sections.extend(self.standard_sections());
@@ -560,11 +561,6 @@ impl AgentMemory {
         }
     }
 
-    /// Learnings, each core scope, brain (at most
-    /// [`BRAIN_SCOPES_PER_TURN`] scopes), this agent's history, then the
-    /// team's, each filled by fetch; a zero limit leaves its section out. A
-    /// layout that pools conversations has no team section: it would read
-    /// the same node as the history.
     /// The thread's own latest turns, up to `limit`.
     fn thread_section(&self, thread_id: &str, limit: usize) -> ScopeSection {
         ScopeSection::latest(
@@ -577,6 +573,10 @@ impl AgentMemory {
         )
     }
 
+    /// Learnings, each core scope, brain (at most
+    /// [`BRAIN_SCOPES_PER_TURN`] scopes), this agent's history, then other
+    /// agents' turns. A zero limit leaves a section out. In a pooled layout,
+    /// history and team read the same node with complementary agent filters.
     fn standard_sections(&self) -> Vec<ScopeSection> {
         let policy = &self.policy;
         let learnings = (
@@ -589,11 +589,6 @@ impl AgentMemory {
             .core
             .iter()
             .map(|scope| (scope.heading.as_str(), scope.filter(), scope.limit, None));
-        let team_limit = if self.layout.pools_conversations() {
-            0
-        } else {
-            policy.team_limit
-        };
         let layout = [
             (
                 BRAIN_HEADING,
@@ -610,7 +605,7 @@ impl AgentMemory {
             (
                 TEAM_HEADING,
                 self.layout.conversations_filter(None),
-                team_limit,
+                policy.team_limit,
                 None,
             ),
         ];
@@ -620,6 +615,11 @@ impl AgentMemory {
             .filter(|(_, _, limit, _)| *limit > 0)
             .map(|(heading, filter, limit, max_scopes)| {
                 let section = ScopeSection::fetch(heading, filter, limit);
+                let section = if heading == TEAM_HEADING {
+                    section.excluding_agent(self.agent_id.clone())
+                } else {
+                    section
+                };
                 match max_scopes {
                     Some(scopes) => section.with_max_scopes(scopes),
                     None => section,

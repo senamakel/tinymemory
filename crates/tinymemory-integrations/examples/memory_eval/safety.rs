@@ -135,9 +135,10 @@ pub(crate) async fn run(
     inspector: Option<&Inspector>,
     run: u64,
     expect_derived: bool,
+    pooled: bool,
 ) -> Result<SafetyReport, Error> {
-    let acme = layout(run, "safety_audit", "acme")?;
-    let globex = layout(run, "safety_audit", "globex")?;
+    let acme = layout(run, "safety_audit", "acme", pooled)?;
+    let globex = layout(run, "safety_audit", "globex", pooled)?;
     let policy = RecallPolicy {
         team_limit: 0,
         ..RecallPolicy::default()

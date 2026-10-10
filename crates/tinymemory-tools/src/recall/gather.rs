@@ -93,7 +93,13 @@ pub(super) async fn section(
     dated: bool,
 ) -> Gathered {
     let section_started = Instant::now();
-    let keep = |hit: &Hit| !request.excludes(hit);
+    let keep = |hit: &Hit| {
+        !request.excludes(hit)
+            && section
+                .exclude_agent_id
+                .as_deref()
+                .is_none_or(|agent| hit.meta.agent_id.as_deref() != Some(agent))
+    };
     let want = wanted(request, section);
     // A date reorders a fetch section's hits after the read, so read deeper
     // than the section shows: a hit from the right day ranked just past the
@@ -496,6 +502,12 @@ pub(super) fn settle(
         .into_iter()
         .filter(|hit| kinds.is_empty() || kinds.contains(&hit.kind))
         .filter(|hit| !request.excludes(hit) && !shown.contains(&hit.id))
+        .filter(|hit| {
+            section
+                .exclude_agent_id
+                .as_deref()
+                .is_none_or(|agent| hit.meta.agent_id.as_deref() != Some(agent))
+        })
         .take(section.limit)
         .collect();
     if section.heading == crate::lifecycle::HISTORY_HEADING

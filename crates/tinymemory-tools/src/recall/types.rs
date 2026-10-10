@@ -57,6 +57,11 @@ pub struct ScopeSection {
     /// [`tinymemory_api::FetchRequest::max_scopes`]); `None` reads them all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_scopes: Option<usize>,
+    /// Agent whose hits a ranked or latest section omits after retrieval.
+    /// Useful when a shared conversation scope is read for other agents'
+    /// turns. An answered section cannot use this exclusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_agent_id: Option<String>,
 }
 
 impl ScopeSection {
@@ -64,6 +69,14 @@ impl ScopeSection {
     #[must_use]
     pub fn with_max_scopes(mut self, scopes: usize) -> Self {
         self.max_scopes = Some(scopes);
+        self
+    }
+
+    /// Omits `agent_id` from a ranked or latest section while retaining
+    /// other agents in the same scope.
+    #[must_use]
+    pub fn excluding_agent(mut self, agent_id: impl Into<String>) -> Self {
+        self.exclude_agent_id = Some(agent_id.into());
         self
     }
 
@@ -76,6 +89,7 @@ impl ScopeSection {
             limit,
             query: SectionQuery::Fetch { query: None },
             max_scopes: None,
+            exclude_agent_id: None,
         }
     }
 
@@ -97,6 +111,7 @@ impl ScopeSection {
                 fallback_to_fetch: false,
             },
             max_scopes: None,
+            exclude_agent_id: None,
         }
     }
 
@@ -109,6 +124,7 @@ impl ScopeSection {
             limit,
             query: SectionQuery::Latest,
             max_scopes: None,
+            exclude_agent_id: None,
         }
     }
 
@@ -127,6 +143,12 @@ impl ScopeSection {
         if self.max_scopes == Some(0) {
             return Err(Error::InvalidRequest(format!(
                 "recall section `{}` reads zero scopes",
+                self.heading
+            )));
+        }
+        if self.exclude_agent_id.is_some() && matches!(self.query, SectionQuery::Answer { .. }) {
+            return Err(Error::InvalidRequest(format!(
+                "recall section `{}` cannot exclude an agent from an answer",
                 self.heading
             )));
         }

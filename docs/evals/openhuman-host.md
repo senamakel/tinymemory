@@ -6,6 +6,38 @@ engine and probes as the default profile, so pack accuracy can be compared
 without changing the stored fixture data. It is a mirror inside TinyMemory;
 there is no dependency on `openhuman-core`.
 
+Use `--layout v3 --team-limit 3` to measure cross-agent recall from pooled
+chats on CortexDB's per-person scope tree. The default host mirror keeps
+OpenHuman's current `team_limit = 0`; the JSON report records the layout and
+team limit so those runs cannot be mistaken for the default profile.
+
+## V3 pooled team recall, 2026-10-10
+
+The team section now reads the same `ws:main` conversation scope as history,
+excluding the current agent's turns before applying its limit. The CortexDB
+v0.10.4 runs below used fresh collections for each setting, the same 5-second
+OpenHuman deadline, and one team limit of three turns. The full mock run has
+58 scored probes per phase; the live OpenRouter slice covers the three
+`team_handoff` and four `conflicts` probes. Each result was the same in recall
+and synthesis.
+
+| Run | Team limit | Pack hits | Extractive answers | Model answers | Probe timeouts |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Full mock v3 | 0 | 48/58 | 31/58 | — | 0 |
+| Full mock v3 | 3 | 51/58 | 34/58 | — | 0 |
+| Live v3 slice | 0 | 3/7 | 1/7 | 2/7 | 0 |
+| Live v3 slice | 3 | 7/7 | 4/7 | 5/7 | 0 |
+
+In the full mock run, `team_handoff/duplicate-invoices`,
+`team_handoff/account-id`, and `conflicts/promise` changed from misses to
+hits; no scored probe moved the other way. The mock paraphrase
+`team_handoff/billed-twice` still misses. With real embeddings it reaches the
+pack, but the model slice remains only seven questions and one fresh run per
+setting. One baseline model answer graded correct despite an empty pack, so
+model scores must be read beside pack hits. CortexDB model cost was $0.022
+with team recall off and $0.021 with it on; that difference is noise at this
+sample size.
+
 The source references below use OpenHuman commit `cf16716f4f` for the hook
 behavior and [OpenHuman PR #7346](https://github.com/tinyhumansai/openhuman/pull/7346)
 for the 5000 ms default.

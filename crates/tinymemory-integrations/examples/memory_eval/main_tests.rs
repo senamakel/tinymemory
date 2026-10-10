@@ -21,6 +21,7 @@ async fn a_probe_does_not_leave_its_question_in_the_measured_corpus() {
         enrich_wait: 0,
         policy: RecallPolicy::default(),
         openhuman: true,
+        pooled: false,
         date_hint: false,
         ranked_wait: 0,
     };
@@ -29,7 +30,7 @@ async fn a_probe_does_not_leave_its_question_in_the_measured_corpus() {
         .unwrap();
     let listed = engine
         .list(ListRequest::new(
-            layout(251, scenario.name, probe.tenant)
+            layout(251, scenario.name, probe.tenant, false)
                 .unwrap()
                 .holistic_filter(),
             100,
@@ -70,6 +71,7 @@ async fn scale_run_separates_direct_fetch_readiness_from_pack_accuracy() {
         enrich_wait: 0,
         policy: RecallPolicy::default(),
         openhuman: true,
+        pooled: false,
         date_hint: false,
         ranked_wait: 0,
     };

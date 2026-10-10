@@ -694,3 +694,11 @@ fn a_section_reading_zero_scopes_is_refused() {
     let request = HolisticRecall::new(Some("q".into()), vec![section.with_max_scopes(0)]);
     assert!(request.validate().is_err());
 }
+
+#[test]
+fn an_answer_section_cannot_exclude_an_agent() {
+    let section = ScopeSection::answer("Team", "What happened?", MetaFilter::default(), 3)
+        .excluding_agent("coder");
+    let request = HolisticRecall::new(None, vec![section]);
+    assert!(matches!(request.validate(), Err(Error::InvalidRequest(_))));
+}

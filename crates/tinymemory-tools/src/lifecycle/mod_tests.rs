@@ -857,17 +857,74 @@ async fn pooled_agents_log_to_one_node_and_keep_their_own_history() {
         .unwrap();
     assert_eq!(listed.items.len(), 2, "both agents' turns at ws:main");
 
-    // Each agent's history is its own turns of the pool; a pooled layout
-    // has no team section, so another agent's turn stays out of the pack.
+    // Own history stays filtered to one agent, while the shared pool also
+    // supplies the other agent's relevant turn in the team section.
     let md = support.recall("refund").await.unwrap().markdown;
     let history = md.find("## This agent's history").unwrap();
     assert!(md[history..].contains("refund delayed"), "{md}");
-    assert!(!md.contains("## Team conversations"), "{md}");
-    assert!(!md.contains("deploy failed"), "{md}");
+    let team = md.find("## Team conversations").unwrap();
+    assert!(!md[history..team].contains("deploy failed"), "{md}");
+    assert!(md[team..].contains("deploy failed"), "{md}");
+    assert!(!md[team..].contains("refund delayed"), "{md}");
+}
+
+#[tokio::test]
+async fn pooled_team_reads_past_own_ranked_turns_without_crossing_roots() {
+    let engine = Arc::new(ReferenceEngine::new());
+    let node: Namespace = "ws:main".parse().unwrap();
+    let mine = MemoryLayout::new("team:mine".parse().unwrap())
+        .unwrap()
+        .with_pooled_conversations(&node)
+        .unwrap();
+    let other = MemoryLayout::new("team:other".parse().unwrap())
+        .unwrap()
+        .with_pooled_conversations(&node)
+        .unwrap();
+    let coder = AgentMemory::new(engine.clone(), mine.clone(), "coder").unwrap();
+    let support = AgentMemory::new(engine.clone(), mine, "support").unwrap();
+    let outsider = AgentMemory::new(engine, other, "outsider").unwrap();
+    support
+        .pre_turn(PreTurn::new(
+            "ticket",
+            0,
+            "refund escalation belongs to support",
+        ))
+        .await
+        .unwrap();
+    outsider
+        .pre_turn(PreTurn::new(
+            "foreign",
+            0,
+            "refund secret from another team",
+        ))
+        .await
+        .unwrap();
+    for index in 0..30 {
+        coder
+            .pre_turn(PreTurn::new(format!("own-{index}"), 0, "refund status"))
+            .await
+            .unwrap();
+    }
+    let pack = coder.recall("refund escalation").await.unwrap();
+    let team = pack
+        .sections
+        .iter()
+        .find(|section| section.heading == TEAM_HEADING)
+        .unwrap();
+    assert!(
+        team.hits
+            .iter()
+            .all(|hit| hit.meta.agent_id.as_deref() != Some("coder"))
+    );
+    assert!(
+        pack.markdown
+            .contains("refund escalation belongs to support")
+    );
+    assert!(!pack.markdown.contains("refund secret from another team"));
 }
 
 #[test]
-fn the_brain_reads_few_scopes_and_pooled_chats_have_no_team_section() {
+fn the_brain_reads_few_scopes_and_pooled_chats_have_a_team_section() {
     let engine = Arc::new(ReferenceEngine::new());
     let sections = memory(&engine, "s").standard_sections();
     for section in &sections {
@@ -880,7 +937,8 @@ fn the_brain_reads_few_scopes_and_pooled_chats_have_no_team_section() {
             .any(|section| section.heading == TEAM_HEADING)
     );
 
-    // Pooled, every agent's history is the team's node: no team section.
+    // Pooled, history filters to this agent while team reads the same node
+    // for other agents' turns.
     let pooled = MemoryLayout::default()
         .with_pooled_conversations(&"ws:main".parse().unwrap())
         .unwrap();
@@ -892,7 +950,12 @@ fn the_brain_reads_few_scopes_and_pooled_chats_have_no_team_section() {
         .collect();
     assert_eq!(
         headings,
-        [LEARNINGS_HEADING, BRAIN_HEADING, HISTORY_HEADING]
+        [
+            LEARNINGS_HEADING,
+            BRAIN_HEADING,
+            HISTORY_HEADING,
+            TEAM_HEADING
+        ]
     );
 }
 
