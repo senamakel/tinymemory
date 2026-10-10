@@ -530,3 +530,7 @@ mod test_support;
 #[cfg(test)]
 #[path = "mod_retired_root_tests.rs"]
 mod retired_root_tests;
+
+#[cfg(test)]
+#[path = "mod_forget_within_tests.rs"]
+mod forget_within_tests;
