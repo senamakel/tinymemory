@@ -3,6 +3,7 @@
 
 use super::*;
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
@@ -20,6 +21,8 @@ struct Paging {
     descriptor: EngineDescriptor,
     hits: Vec<Hit>,
     pages: AtomicUsize,
+    /// Every forget target, in order.
+    forgets: Mutex<Vec<ForgetTarget>>,
 }
 
 impl Paging {
@@ -38,6 +41,7 @@ impl Paging {
             },
             hits,
             pages: AtomicUsize::new(0),
+            forgets: Mutex::new(Vec::new()),
         }
     }
 }
@@ -59,8 +63,13 @@ impl MemoryEngine for Paging {
     async fn store(&self, _: StoreItem) -> Result<StoreReceipt> {
         Err(Error::Unsupported("store".into()))
     }
-    async fn forget(&self, _: ForgetTarget) -> Result<ForgetReport> {
-        Err(Error::Unsupported("forget".into()))
+    async fn forget(&self, target: ForgetTarget) -> Result<ForgetReport> {
+        let forgotten = match &target {
+            ForgetTarget::Ids(ids) => ids.len(),
+            ForgetTarget::Filter(_) => 0,
+        };
+        self.forgets.lock().unwrap().push(target);
+        Ok(ForgetReport { forgotten })
     }
     async fn list(&self, req: ListRequest) -> Result<ListPage> {
         self.pages.fetch_add(1, Ordering::SeqCst);
@@ -427,4 +436,111 @@ async fn get_leaves_out_ids_beyond_the_reach() {
         .await
         .unwrap();
     assert!(hits.is_empty());
+}
+
+/// Two items at sibling agents, and one at the root.
+fn agents() -> Vec<Hit> {
+    let at = |id: &str, namespace: &str| {
+        hit(
+            id,
+            ItemKind::Learning,
+            MemoryMeta {
+                namespace: namespace.parse().unwrap(),
+                ..MemoryMeta::default()
+            },
+        )
+    };
+    vec![
+        at("mine", "agent:ann"),
+        at("theirs", "agent:anna"),
+        at("shared", ""),
+    ]
+}
+
+#[test]
+fn forget_within_ids_are_checked_and_deduplicated() {
+    assert!(matches!(
+        forget_within_ids(Vec::new()),
+        Err(Error::InvalidRequest(_))
+    ));
+    assert_eq!(
+        forget_within_ids(vec![ItemId::new("a"), ItemId::new(" ")]),
+        Err(Error::InvalidRequest("an id must not be blank".to_string()))
+    );
+    assert_eq!(
+        forget_within_ids(vec![ItemId::new("b"), ItemId::new("a"), ItemId::new("b")]).unwrap(),
+        vec![ItemId::new("b"), ItemId::new("a")]
+    );
+}
+
+#[tokio::test]
+async fn forget_within_forgets_only_the_ids_inside_the_reach() {
+    let engine = Paging::new(agents());
+    let report = engine
+        .forget_within(
+            vec![
+                ItemId::new("mine"),
+                ItemId::new("theirs"),
+                ItemId::new("gone"),
+            ],
+            Reach::exact("agent:ann".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.forgotten, 1);
+    assert_eq!(
+        *engine.forgets.lock().unwrap(),
+        vec![ForgetTarget::Ids(vec![ItemId::new("mine")])],
+        "only the id found in reach is forgotten"
+    );
+}
+
+#[tokio::test]
+async fn forget_within_sends_no_forget_when_nothing_is_in_reach() {
+    let engine = Paging::new(agents());
+    let report = engine
+        .forget_within(
+            vec![ItemId::new("theirs")],
+            Reach::subtree("agent:ann".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report, ForgetReport::default());
+    assert!(engine.forgets.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn forget_within_reads_ids_back_in_get_sized_batches() {
+    let mut hits = agents();
+    hits.extend((0..MAX_GET_IDS).map(|i| {
+        hit(
+            &format!("n{i}"),
+            ItemKind::Learning,
+            MemoryMeta {
+                namespace: "agent:ann".parse().unwrap(),
+                ..MemoryMeta::default()
+            },
+        )
+    }));
+    let engine = Paging::new(hits);
+    let mut ids: Vec<ItemId> = (0..MAX_GET_IDS)
+        .map(|i| ItemId::new(format!("n{i}")))
+        .collect();
+    ids.push(ItemId::new("theirs"));
+    let report = engine
+        .forget_within(ids, Reach::of("agent:ann".parse().unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(report.forgotten, MAX_GET_IDS);
+}
+
+#[tokio::test]
+async fn forget_within_refuses_no_ids_before_reading() {
+    let engine = Paging::new(agents());
+    let error = engine
+        .forget_within(Vec::new(), Reach::default())
+        .await
+        .expect_err("no ids");
+    assert!(matches!(error, Error::InvalidRequest(_)));
+    assert_eq!(engine.pages.load(Ordering::SeqCst), 0);
 }
