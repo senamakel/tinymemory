@@ -52,11 +52,10 @@ pub(super) const DATED_DEPTH: usize = 3;
 /// Page size of a [`SectionQuery::Latest`] listing.
 const LATEST_PAGE: usize = 100;
 
-/// Most listing pages read before ranking; a ceiling, not a target.
+/// Most listing pages read before ranking, except for lifecycle team recall.
 const LATEST_MAX_PAGES: usize = 50;
 
-/// Most ranked pages a fetch section reads to replace hits its exclusions
-/// dropped.
+/// Most ranked pages a generic fetch section reads to replace excluded hits.
 const FETCH_MAX_PAGES: usize = 5;
 
 /// What one section read.
@@ -128,9 +127,12 @@ pub(super) async fn section(
                     section,
                     question,
                     fetch_want,
-                    0,
                     &keep,
-                    request.refers_to.clone(),
+                    FetchOptions {
+                        beliefs: 0,
+                        refers_to: request.refers_to.clone(),
+                        scan_all: excluded_agent.is_some(),
+                    },
                 )
                 .await
             }
@@ -144,12 +146,29 @@ pub(super) async fn section(
             {
                 Some(query) => {
                     let hint = request.refers_to.clone();
-                    fetch(engine, section, query, fetch_want, beliefs, &keep, hint).await
+                    fetch(
+                        engine,
+                        section,
+                        query,
+                        fetch_want,
+                        &keep,
+                        FetchOptions {
+                            beliefs,
+                            refers_to: hint,
+                            scan_all: excluded_agent.is_some(),
+                        },
+                    )
+                    .await
                 }
-                None => with_listed_beliefs(engine, section, want, &keep).await,
+                None => {
+                    with_listed_beliefs(engine, section, want, &keep, excluded_agent.is_some())
+                        .await
+                }
             }
         }
-        SectionQuery::Latest => with_listed_beliefs(engine, section, want, &keep).await,
+        SectionQuery::Latest => {
+            with_listed_beliefs(engine, section, want, &keep, excluded_agent.is_some()).await
+        }
     };
     log::trace!(target: "tinymemory_eval_timing", "recall_section={}", section_started.elapsed().as_secs_f64() * 1_000.0);
     match outcome {
@@ -280,10 +299,11 @@ async fn with_listed_beliefs(
     section: &ScopeSection,
     want: usize,
     keep: &(dyn Fn(&Hit) -> bool + Sync),
+    scan_all: bool,
 ) -> tinymemory_api::Result<(Vec<Hit>, Vec<Hit>)> {
     if !reads_learnings(section) {
         return Ok((
-            latest(engine, &section.filter, want, keep).await?,
+            latest(engine, &section.filter, want, keep, scan_all).await?,
             Vec::new(),
         ));
     }
@@ -293,7 +313,7 @@ async fn with_listed_beliefs(
         .clone()
         .unwrap_or_else(|| Reach::subtree(Namespace::ROOT));
     let (hits, beliefs) = join(
-        latest(engine, &section.filter, want, keep),
+        latest(engine, &section.filter, want, keep, scan_all),
         engine.beliefs(BeliefsRequest::new(reach, want)),
     )
     .await;
@@ -359,37 +379,50 @@ fn interleave(first: Vec<Hit>, second: impl IntoIterator<Item = Hit>) -> Vec<Hit
     }
 }
 
-/// One page of ranked hits; an engine that declares no fetch mode is read
+/// Ranked read options that do not identify the section or query.
+struct FetchOptions {
+    beliefs: usize,
+    refers_to: Option<TimeHint>,
+    scan_all: bool,
+}
+
+/// Ranked pages of hits; an engine that declares no fetch mode is read
 /// newest first instead.
 async fn fetch(
     engine: &dyn MemoryEngine,
     section: &ScopeSection,
     query: &str,
     limit: usize,
-    beliefs: usize,
     keep: &(dyn Fn(&Hit) -> bool + Sync),
-    refers_to: Option<TimeHint>,
+    options: FetchOptions,
 ) -> tinymemory_api::Result<(Vec<Hit>, Vec<Hit>)> {
     let Some(mode) = preferred_mode(engine) else {
         return Ok((
-            latest(engine, &section.filter, limit, keep).await?,
+            latest(engine, &section.filter, limit, keep, options.scan_all).await?,
             Vec::new(),
         ));
     };
     // Exclusions (the prompt's thread window, shown ids) are dropped page by
     // page. Only when a page lost hits to them and too few remain is the next
     // page read, so the common case is still one request (each page is a
-    // round trip on a hosted engine), and the walk is capped.
+    // round trip on a hosted engine). Generic recall is capped; lifecycle
+    // team recall must scan until it finds another agent or reaches the end.
     let mut hits: Vec<Hit> = Vec::new();
     let mut first_beliefs = Vec::new();
     let mut cursor: Option<String> = None;
-    for page_no in 0..FETCH_MAX_PAGES {
+    let mut seen_cursors = HashSet::new();
+    let max_pages = if options.scan_all {
+        usize::MAX
+    } else {
+        FETCH_MAX_PAGES
+    };
+    for page_no in 0..max_pages {
         let mut request = FetchRequest::new(query, mode, limit);
         request.filter = section.filter.clone();
         request.max_scopes = section.max_scopes;
-        request.beliefs = if page_no == 0 { beliefs } else { 0 };
+        request.beliefs = if page_no == 0 { options.beliefs } else { 0 };
         request.cursor = cursor.take();
-        request.refers_to = refers_to.clone();
+        request.refers_to = options.refers_to.clone();
         let page = engine.fetch(request).await?;
         if page_no == 0 {
             first_beliefs = page.beliefs;
@@ -399,7 +432,9 @@ async fn fetch(
         hits.extend(page.hits.into_iter().filter(|hit| keep(hit)));
         let lost_some = hits.len() - before < fetched;
         match page.next_cursor {
-            Some(next) if hits.len() < limit && lost_some => cursor = Some(next),
+            Some(next) if hits.len() < limit && lost_some && seen_cursors.insert(next.clone()) => {
+                cursor = Some(next);
+            }
             _ => break,
         }
     }
@@ -418,17 +453,24 @@ async fn latest(
     filter: &MetaFilter,
     limit: usize,
     keep: &(dyn Fn(&Hit) -> bool + Sync),
+    scan_all: bool,
 ) -> tinymemory_api::Result<Vec<Hit>> {
     let mut all: Vec<Hit> = Vec::new();
     let mut cursor: Option<String> = None;
-    for _ in 0..LATEST_MAX_PAGES {
+    let mut seen_cursors = HashSet::new();
+    let max_pages = if scan_all {
+        usize::MAX
+    } else {
+        LATEST_MAX_PAGES
+    };
+    for _ in 0..max_pages {
         let mut request = ListRequest::new(filter.clone(), LATEST_PAGE);
         request.cursor = cursor.take();
         let page = engine.list(request).await?;
         all.extend(page.items.into_iter().filter(|hit| keep(hit)));
         match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => break,
+            Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+            _ => break,
         }
     }
     all.sort_by(|a, b| {

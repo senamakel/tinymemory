@@ -182,8 +182,10 @@ skipped, engine }`.
   history, and team conversations (other agents under the same layout root).
   In a pooled layout both conversation sections read the same chat node:
   history selects this agent's id, while team excludes it. The team limit
-  counts selected turns, not agents or threads. A zero limit in `RecallPolicy`
-  leaves a section out. Team recall never reaches another person's root.
+  counts selected turns, not agents or threads. Excluded own turns cannot
+  exhaust a fixed retrieval page cap before eligible team turns are reached.
+  A zero limit in `RecallPolicy` leaves a section out. Team recall never
+  reaches another person's root.
 - **`pre_turn` never fails on an engine error.** A failed log is reported in
   `TurnContext::log_error` and the pack is still returned.
 - **`post_turn` reports belief builds.** It returns a `BuildBeliefs` job for

@@ -880,7 +880,15 @@ async fn pooled_team_reads_past_own_ranked_turns_without_crossing_roots() {
         .unwrap()
         .with_pooled_conversations(&node)
         .unwrap();
-    let coder = AgentMemory::new(engine.clone(), mine.clone(), "coder").unwrap();
+    let coder = AgentMemory::new(engine.clone(), mine.clone(), "coder")
+        .unwrap()
+        .with_policy(RecallPolicy {
+            learnings_limit: 0,
+            brain_limit: 0,
+            history_limit: 0,
+            team_limit: 1,
+            ..RecallPolicy::default()
+        });
     let support = AgentMemory::new(engine.clone(), mine, "support").unwrap();
     let outsider = AgentMemory::new(engine, other, "outsider").unwrap();
     support
@@ -899,9 +907,14 @@ async fn pooled_team_reads_past_own_ranked_turns_without_crossing_roots() {
         ))
         .await
         .unwrap();
+    // A one-hit section used to stop after five pages of these own turns.
     for index in 0..30 {
         coder
-            .pre_turn(PreTurn::new(format!("own-{index}"), 0, "refund status"))
+            .pre_turn(PreTurn::new(
+                format!("own-{index}"),
+                0,
+                "refund escalation refund escalation",
+            ))
             .await
             .unwrap();
     }
