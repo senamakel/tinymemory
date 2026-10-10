@@ -124,6 +124,10 @@ pub(crate) struct Double {
     /// (`app:tinymemory/agent:pad-NNNN/app:learnings`), so a test can make a
     /// scope listing reach CortexDB's clamp.
     pub(crate) padding_scopes: AtomicUsize,
+    /// The scope listing matches plain string prefixes (`user:ann` also
+    /// lists `user:anna`), as a backend that does not match whole segments
+    /// would. Off, it matches whole segments.
+    pub(crate) string_prefix_scopes: AtomicBool,
     /// The hosted double has no `DELETE /memory` route (an older backend):
     /// it answers the router's bare 404.
     pub(crate) erase_all_missing: AtomicBool,

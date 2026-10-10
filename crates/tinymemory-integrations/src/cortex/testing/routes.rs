@@ -606,13 +606,26 @@ async fn scopes(
         return refused;
     }
     let prefix = params.get("prefix").cloned().unwrap_or_default();
-    let mut scopes = state.log.lock().unwrap().scopes(&prefix);
+    let string_prefix = state.string_prefix_scopes.load(Ordering::SeqCst);
+    let mut scopes = state
+        .log
+        .lock()
+        .unwrap()
+        .scopes_matching(&prefix, string_prefix);
     let padding = state.padding_scopes.load(Ordering::SeqCst);
-    let below = format!("{prefix}/");
+    let below = if string_prefix || prefix.ends_with('/') {
+        prefix.clone()
+    } else {
+        format!("{prefix}/")
+    };
     scopes.extend(
         (0..padding)
             .map(|n| format!("app:tinymemory/agent:pad-{n:04}/app:learnings"))
-            .filter(|path| prefix.is_empty() || *path == prefix || path.starts_with(&below)),
+            .filter(|path| {
+                prefix.is_empty()
+                    || (!prefix.ends_with('/') && *path == prefix)
+                    || path.starts_with(&below)
+            }),
     );
     scopes.sort();
     scopes.dedup();

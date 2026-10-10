@@ -6,7 +6,7 @@ use reqwest::Method;
 use serde_json::Value;
 
 use super::{Log, MAX_PAGES, PAGE_SIZE};
-use crate::cortex::descriptor::Route;
+use crate::cortex::descriptor::{CortexWire, Route};
 use crate::cortex::error::{Error, Result};
 use crate::cortex::transport::{Attempts, urlencode};
 
