@@ -123,6 +123,33 @@ fn fingerprints_ignore_who_an_item_is_attributed_to() {
 }
 
 #[test]
+fn retried_learning_ignores_the_provider_tool_call_id() {
+    let mut first = StoreItem::learning(
+        "Prefers tea",
+        LearningKind::Preference,
+        0.8,
+        MemoryMeta::default(),
+    );
+    first.meta_mut().namespace = "user:alice".parse().unwrap();
+    first.meta_mut().tool_call = Some(ToolCallRef {
+        name: "memory".into(),
+        id: Some("call-first".into()),
+    });
+    let mut retry = first.clone();
+    retry.meta_mut().tool_call.as_mut().unwrap().id = Some("call-retry".into());
+    assert_eq!(first.fingerprint(), retry.fingerprint());
+    assert_eq!(
+        first.meta().tool_call.as_ref().unwrap().id.as_deref(),
+        Some("call-first")
+    );
+    retry.meta_mut().namespace = "user:bob".parse().unwrap();
+    assert_ne!(first.fingerprint(), retry.fingerprint());
+    retry.meta_mut().namespace = first.meta().namespace.clone();
+    retry.meta_mut().tool_call.as_mut().unwrap().name = "another-tool".into();
+    assert_ne!(first.fingerprint(), retry.fingerprint());
+}
+
+#[test]
 fn items_serialise_with_a_type_tag_and_round_trip() {
     let item = StoreItem::learning("tea", LearningKind::Preference, 0.9, MemoryMeta::default());
     let json = serde_json::to_value(&item).expect("serialise");
