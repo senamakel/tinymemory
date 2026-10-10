@@ -75,7 +75,7 @@ async fn a_string_prefix_backend_lists_no_sibling_on_either_wire() {
 
 #[test]
 fn whole_segment_matching_keeps_a_tenant_prefix_and_drops_a_sibling() {
-    use super::super::super::log::below_whole_segments as below;
+    use crate::cortex::log::below_whole_segments as below;
     assert!(below("app:tinymemory/user:ann/app:learnings", ANN));
     assert!(below("org:1/app:tinymemory/user:ann/app:learnings", ANN));
     assert!(below(ANN, ANN));

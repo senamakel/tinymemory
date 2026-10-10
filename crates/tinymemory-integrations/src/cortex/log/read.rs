@@ -249,7 +249,7 @@ impl Log {
 /// Whether `path` is `prefix` or below it, matching whole segments: the
 /// prefix may sit behind a tenant prefix the hosted backend adds, but
 /// `user:anna` is never below `user:ann`.
-fn below_whole_segments(path: &str, prefix: &str) -> bool {
+pub(crate) fn below_whole_segments(path: &str, prefix: &str) -> bool {
     let prefix = prefix.trim_end_matches('/');
     path == prefix
         || path.starts_with(&format!("{prefix}/"))

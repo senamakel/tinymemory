@@ -48,6 +48,7 @@ mod read;
 mod visibility;
 mod write;
 
+pub(crate) use read::below_whole_segments;
 pub(crate) use write::Written;
 
 use std::time::Duration;
