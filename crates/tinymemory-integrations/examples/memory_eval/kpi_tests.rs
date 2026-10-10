@@ -27,6 +27,7 @@ fn report(name: &'static str, probes: Vec<ProbeResult>, conflicts: &[&str]) -> S
         about: "",
         writes: 0,
         tool_calls: 0,
+        pre_turn_timeouts: 0,
         settle_ms: 0.0,
         synthesis: Synthesis {
             captured: Captured {
@@ -171,6 +172,20 @@ fn latency_reads_the_pre_turn_and_probe_samples() {
     assert_eq!(value(&kpis, "pre_turn p50"), Some(20.0));
     assert_eq!(value(&kpis, "probe p95"), Some(7.0));
     assert_eq!(value(&kpis, "pack hit"), None);
+}
+
+#[test]
+fn timeout_rate_counts_scripted_turns_and_probe_turns() {
+    let mut timed_out = probed("brain_lookup", "recall", false);
+    timed_out.timed_out = true;
+    let on_time = probed("brain_lookup", "synthesis", true);
+    let mut report = report("brain_lookup", vec![timed_out, on_time], &[]);
+    report.pre_turn_timeouts = 1;
+    let mut timings = Timings::default();
+    timings.add("pre_turn (log + recall)", 1_500.0);
+    timings.add("pre_turn (log + recall)", 200.0);
+    let kpis = compute(&[report], None, &timings);
+    assert_eq!(value(&kpis, "pre_turn timeout rate"), Some(50.0));
 }
 
 #[test]

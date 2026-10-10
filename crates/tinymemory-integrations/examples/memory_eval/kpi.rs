@@ -455,6 +455,17 @@ pub(crate) fn compute(
             .collect()
     };
     let pre_turn = Latency::of(&samples(&|step| step.starts_with("pre_turn")));
+    let pre_turn_timeouts = reports.iter().map(|r| r.pre_turn_timeouts).sum::<usize>()
+        + reports
+            .iter()
+            .flat_map(|r| &r.probes)
+            .filter(|probe| probe.timed_out)
+            .count();
+    let probe_pre_turns = reports
+        .iter()
+        .flat_map(|r| &r.probes)
+        .filter(|probe| probe.via.starts_with("pre_turn"))
+        .count();
     let probe = Latency::of(&samples(&|step| step.starts_with("probe ")));
     let total = |step: &str| {
         timings
@@ -475,6 +486,20 @@ pub(crate) fn compute(
             "pre_turn p95",
             (pre_turn.n > 0).then_some(pre_turn.p95),
             Unit::Ms,
+            Lower,
+        ),
+        Kpi::new(
+            "latency",
+            "pre_turn p99",
+            (pre_turn.n > 0).then_some(pre_turn.p99),
+            Unit::Ms,
+            Lower,
+        ),
+        Kpi::rate(
+            "latency",
+            "pre_turn timeout rate",
+            pre_turn_timeouts,
+            pre_turn.n + probe_pre_turns,
             Lower,
         ),
         Kpi::new(

@@ -15,11 +15,17 @@
 //! The extractive answer is a stand-in for a model reading the pack. It
 //! scores what a model would see, not how well some model reasons.
 
-use std::time::Instant;
+use std::collections::HashSet;
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, Utc};
-use tinymemory_api::ToolCallRef;
-use tinymemory_tools::{AgentMemory, BackgroundJob, ContextPack, PostTurn, PreTurn};
+use tinymemory_api::{Error, ToolCallRef};
+use tinymemory_tools::{AgentMemory, BackgroundJob, PostTurn, PreTurn, TurnContext};
+
+/// OpenHuman's default deadline for the pack before a model turn.
+pub(crate) const PRE_TURN_TIMEOUT: StdDuration = StdDuration::from_millis(1_500);
+/// OpenHuman's maximum length of one logged tool result.
+const MAX_TOOL_LINE_CHARS: usize = 240;
 
 /// A scripted tool call and the result the "tool" returns.
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +45,14 @@ pub(crate) struct TurnRecord {
     pub(crate) post_ms: f64,
     /// Whether the user turn was logged.
     pub(crate) logged: bool,
+    /// Whether OpenHuman would have continued with an empty pack.
+    pub(crate) timed_out: bool,
+    /// Tokens in the pack injected into the simulated model prompt.
+    pub(crate) pack_tokens: usize,
+    /// Repeated bullet lines in the injected pack.
+    pub(crate) duplicate_lines: usize,
+    /// Bullet lines in the injected pack.
+    pub(crate) pack_lines: usize,
     /// The jobs `post_turn` handed back.
     pub(crate) jobs: Vec<BackgroundJob>,
     /// How many tool calls the reply made.
@@ -53,6 +67,8 @@ pub(crate) struct ScriptedAgent {
     /// How many of the thread's turns stay in the prompt.
     window: u32,
     clock: Option<DateTime<Utc>>,
+    openhuman: bool,
+    pending: Vec<tokio::task::JoinHandle<Result<TurnContext, Error>>>,
 }
 
 impl ScriptedAgent {
@@ -65,7 +81,28 @@ impl ScriptedAgent {
             next: 0,
             window,
             clock: None,
+            openhuman: false,
+            pending: Vec::new(),
         }
+    }
+
+    /// Mirror OpenHuman's dated hook, deadline, and reply logging.
+    pub(crate) fn openhuman(mut self) -> Self {
+        self.openhuman = true;
+        self
+    }
+
+    /// Wait for pre-turn tasks whose host deadline expired. OpenHuman leaves
+    /// those tasks running, so their accepted user turns may still land.
+    pub(crate) async fn flush(&mut self) -> Result<usize, Error> {
+        let mut logged = 0;
+        for task in self.pending.drain(..) {
+            let context = task
+                .await
+                .map_err(|error| Error::Unavailable(format!("pre-turn task failed: {error}")))??;
+            logged += usize::from(context.logged.is_some());
+        }
+        Ok(logged)
     }
 
     /// Timestamps the thread's turns from `at`, a minute apart.
@@ -97,10 +134,46 @@ impl ScriptedAgent {
         pre.in_prompt_from = self.in_prompt_from();
         pre.at = self.tick();
         let started = Instant::now();
-        let context = self.memory.pre_turn(pre).await?;
+        let context = if self.openhuman {
+            let memory = self.memory.clone();
+            let mut task =
+                tokio::spawn(
+                    async move { memory.pre_turn_dated(pre, false, async { None }).await },
+                );
+            match tokio::time::timeout(PRE_TURN_TIMEOUT, &mut task).await {
+                Ok(result) => Some(result.map_err(|error| {
+                    Error::Unavailable(format!("pre-turn task failed: {error}"))
+                })??),
+                Err(_) => {
+                    self.pending.push(task);
+                    None
+                }
+            }
+        } else {
+            Some(self.memory.pre_turn(pre).await?)
+        };
         let pre_ms = ms(started);
 
-        let reply = reply(&context.pack, text, tools);
+        let markdown = context
+            .as_ref()
+            .map_or("", |value| value.pack.markdown.as_str());
+        let mut seen = HashSet::new();
+        let lines: Vec<&str> = markdown
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect();
+        let duplicate_lines = lines.iter().filter(|line| !seen.insert(**line)).count();
+        let prompt = if self.openhuman && !markdown.is_empty() {
+            format!("<memory-context>\n{markdown}\n</memory-context>\n\n{text}")
+        } else {
+            markdown.to_string()
+        };
+        let answer = reply(&prompt, text, if self.openhuman { &[] } else { tools });
+        let reply = if self.openhuman {
+            logged_reply(&answer, tools)
+        } else {
+            answer
+        };
         let mut post = PostTurn::new(&self.thread, self.next + 1, reply);
         post.tool_calls = tools
             .iter()
@@ -118,7 +191,11 @@ impl ScriptedAgent {
         Ok(TurnRecord {
             pre_ms,
             post_ms,
-            logged: context.logged.is_some(),
+            logged: context.as_ref().is_some_and(|value| value.logged.is_some()),
+            timed_out: context.is_none(),
+            pack_tokens: context.as_ref().map_or(0, |value| value.pack.tokens),
+            duplicate_lines,
+            pack_lines: lines.len(),
             jobs: report.jobs,
             tool_calls: tools.len(),
         })
@@ -127,13 +204,13 @@ impl ScriptedAgent {
 
 /// The agent's reply: tool results first, then an answer or an
 /// acknowledgement.
-fn reply(pack: &ContextPack, text: &str, tools: &[ToolStep]) -> String {
+fn reply(markdown: &str, text: &str, tools: &[ToolStep]) -> String {
     let mut lines: Vec<String> = tools
         .iter()
         .map(|step| format!("{} returned: {}", step.name, step.result))
         .collect();
     if text.trim_end().ends_with('?') {
-        lines.push(match answer(&pack.markdown, text) {
+        lines.push(match answer(markdown, text) {
             Some(line) => format!("Going by memory: {line}"),
             None => NOT_IN_MEMORY.to_string(),
         });
@@ -141,6 +218,28 @@ fn reply(pack: &ContextPack, text: &str, tools: &[ToolStep]) -> String {
         lines.push("Noted.".to_string());
     }
     lines.join("\n")
+}
+
+/// The reply OpenHuman stores: the model's text and bounded tool-result lines.
+fn logged_reply(text: &str, tools: &[ToolStep]) -> String {
+    let lines: Vec<String> = tools
+        .iter()
+        .filter_map(|step| {
+            let result = step.result.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!result.is_empty()).then(|| {
+                format!(
+                    "- {} → {}",
+                    step.name,
+                    result.chars().take(MAX_TOOL_LINE_CHARS).collect::<String>()
+                )
+            })
+        })
+        .collect();
+    if lines.is_empty() {
+        text.trim().to_string()
+    } else {
+        format!("{}\n\nTools:\n{}", text.trim(), lines.join("\n"))
+    }
 }
 
 /// The agent's reply when nothing in the pack answers.
@@ -189,3 +288,7 @@ pub(crate) fn answer(markdown: &str, question: &str) -> Option<String> {
 pub(crate) fn ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1e3
 }
+
+#[cfg(test)]
+#[path = "agent_tests.rs"]
+mod tests;
