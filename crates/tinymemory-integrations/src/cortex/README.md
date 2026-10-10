@@ -246,7 +246,10 @@ as prefixes, so they cannot be labelled and are filtered only client-side.
   chunked document taken from its first event (its first turn, its first
   piece) instead of being assembled; same items, order and cursors.
 - **Forget.** `Ids` looks the items' labels up in every scope the engine
-  holds. `Filter` (which must be non-empty) walks the scopes it reads and
+  holds. `forget_within` looks them up only in the scopes its reach admits,
+  found as a read with that reach finds them (no listing for a reach without
+  descendants, one listing under the reach's own node for a subtree), so it
+  never lists or reads another tree. `Filter` (which must be non-empty) walks the scopes it reads and
   matches the full filter. Either way the matched events are then removed with
   `selector.memory_ids` and `cascade: "redact_events"`, in batches of 100.
   The cascade is always named: CortexDB's default, `derived_only`, keeps the
