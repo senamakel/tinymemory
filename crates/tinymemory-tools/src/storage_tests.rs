@@ -238,6 +238,34 @@ async fn driver_claims_are_exclusive_fenced_and_recover_after_expiry() {
 }
 
 #[tokio::test]
+async fn one_store_handle_cannot_claim_a_live_item_twice() {
+    let (clock, _) = clock_at(4_000);
+    let backend = backend(clock.clone()).await;
+    let store = list_store(backend, Scope::local(), clock);
+    store
+        .append(
+            "single-owner",
+            Item {
+                id: "single-owner".into(),
+                value: "pending".into(),
+            },
+        )
+        .unwrap();
+    let claim = store
+        .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
+        .unwrap()
+        .expect("first claim owns the item");
+
+    assert!(
+        store
+            .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.acknowledge(&claim).unwrap());
+}
+
+#[tokio::test]
 async fn driver_retry_nacks_until_its_visibility_deadline() {
     let (clock, now) = clock_at(5_000);
     let backend = backend(clock.clone()).await;
