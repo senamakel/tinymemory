@@ -95,8 +95,8 @@ pub enum Selection {
 /// Synchronous host port for legacy snapshots and queue operations. Local
 /// providers may use the default snapshot-based operations; multi-consumer
 /// providers override enqueue, claim, and settlement with atomic item-level
-/// operations. A missing or unreadable queue loads as empty; a failed save is
-/// logged and the in-memory run carries on.
+/// operations and may reject snapshot replacement. A missing or unreadable
+/// queue loads as empty; the in-memory provider persists snapshots directly.
 pub trait QueueStore: Send + Sync {
     /// The saved queue, empty when there is none.
     fn load(&self) -> QueueState;

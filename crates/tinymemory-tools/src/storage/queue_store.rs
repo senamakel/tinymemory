@@ -269,8 +269,7 @@ impl QueueStore for DriverQueueStore {
         QueueState { pending, history }
     }
 
-    fn save(&self, state: &QueueState) -> Result<(), String> {
-        let _ = state;
+    fn save(&self, _state: &QueueState) -> Result<(), String> {
         Err("snapshot replacement is unsupported for DriverQueueStore; use enqueue_item, claim_next/settle, or import_legacy".into())
     }
 

@@ -364,22 +364,22 @@ async fn driver_list_preserves_fifo_scope_and_idempotent_target_wins_import() {
     assert_eq!(store.load().unwrap()[2].value, "new target value");
     assert!(other.load().unwrap().is_empty());
 
-    store
-        .save(&[
-            Item {
-                id: "occurrence-2".into(),
-                value: "updated second".into(),
-            },
-            Item {
-                id: "occurrence-1".into(),
-                value: "first".into(),
-            },
-        ])
-        .unwrap();
-    let replaced = store.load().unwrap();
-    assert_eq!(replaced[0].id, "occurrence-2");
-    assert_eq!(replaced[0].value, "updated second");
-    assert_eq!(replaced[1].id, "occurrence-1");
+    let before = store.load().unwrap();
+    assert!(
+        store
+            .save(&[
+                Item {
+                    id: "occurrence-2".into(),
+                    value: "updated second".into(),
+                },
+                Item {
+                    id: "occurrence-1".into(),
+                    value: "first".into(),
+                },
+            ])
+            .is_err()
+    );
+    assert_eq!(store.load().unwrap(), before);
 }
 
 #[tokio::test]
@@ -526,15 +526,17 @@ async fn driver_queue_import_is_idempotent_and_preserves_newer_target_jobs() {
     assert_eq!(loaded.pending[2], target_wins);
     assert_eq!(loaded.history, legacy_state.history);
 
-    store
-        .save(&QueueState {
-            pending: vec![newer.clone()],
-            history: Vec::new(),
-        })
-        .unwrap();
+    assert!(
+        store
+            .save(&QueueState {
+                pending: vec![newer.clone()],
+                history: Vec::new(),
+            })
+            .is_err()
+    );
     let replaced = store.load();
-    assert_eq!(replaced.pending, vec![newer]);
-    assert!(replaced.history.is_empty());
+    assert_eq!(replaced.pending, loaded.pending);
+    assert_eq!(replaced.history, loaded.history);
 }
 
 fn learn(text: &str) -> WriteOperation {

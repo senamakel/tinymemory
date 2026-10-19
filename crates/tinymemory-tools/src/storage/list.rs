@@ -476,8 +476,7 @@ where
         .map_err(error)
     }
 
-    fn save(&self, entries: &[T]) -> Result<(), StoreError> {
-        let _ = entries;
+    fn save(&self, _entries: &[T]) -> Result<(), StoreError> {
         Err(StoreError(
             "snapshot replacement is unsupported for driver-backed queues; use append, claim/ack/retry, or import_items".into(),
         ))
