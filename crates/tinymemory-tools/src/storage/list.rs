@@ -477,41 +477,61 @@ where
     }
 
     fn save(&self, entries: &[T]) -> Result<(), StoreError> {
-        // Compatibility snapshot importer. Live consumers use append/claim/
-        // acknowledge/retry below and never replace the whole collection.
-        let mut used = Vec::with_capacity(entries.len());
+        let mut ids = Vec::with_capacity(entries.len());
         for item in entries {
             let id = (self.id_of)(item);
-            if used.iter().any(|known: &String| known == &id) {
+            if ids.contains(&id) {
                 return Err(StoreError("list item ids must be unique".into()));
             }
-            used.push(id);
+            ids.push(id);
         }
-        let existing = self.load()?;
-        let existing_ids: Vec<_> = existing.iter().map(|item| (self.id_of)(item)).collect();
-        for id in existing_ids {
-            if !used.contains(&id) {
-                let storage = self.storage()?;
-                let blocking = self.blocking.clone();
-                let collection = self.collection;
-                blocking
-                    .run(async move {
-                        let docs = storage.documents();
-                        if let Some(row) = docs.get(collection, &id).await? {
-                            docs.delete(collection, &id, Precondition::Version(row.version))
-                                .await?;
-                        }
-                        Ok::<_, StorageError>(())
-                    })
-                    .map_err(error)?
-                    .map_err(error)?;
-            }
-        }
-        for item in entries {
-            let id = (self.id_of)(item);
-            let _ = self.append_item(id, item.clone())?;
-        }
-        Ok(())
+        let storage = self.storage()?;
+        let blocking = self.blocking.clone();
+        let collection = self.collection;
+        let owner = collection.to_owned();
+        let entries = entries.to_vec();
+        let id_of = Arc::clone(&self.id_of);
+        blocking
+            .run(async move {
+                let documents = storage.documents().clone();
+                for row in Self::all_documents(Arc::clone(&documents), collection).await? {
+                    if !ids.contains(&row.id) {
+                        documents
+                            .delete(collection, &row.id, Precondition::Version(row.version))
+                            .await?;
+                    }
+                }
+                let counters = Counters::new(&documents);
+                for item in entries {
+                    let id = id_of(&item);
+                    let existing = documents.get_as::<Stored<T>>(collection, &id).await?;
+                    let sequence = i64::try_from(counters.next("tinymemory", &owner).await?)
+                        .map_err(|_| StorageError::invalid_input("queue sequence out of range"))?;
+                    let (precondition, claimed_epoch) = match existing {
+                        Some(existing) => (
+                            Precondition::Version(existing.version),
+                            existing.doc.claimed_epoch,
+                        ),
+                        None => (Precondition::Absent, 0),
+                    };
+                    documents
+                        .put_as(
+                            collection,
+                            &id,
+                            &Stored {
+                                sequence,
+                                item,
+                                claimed_epoch,
+                                not_before_ms: None,
+                            },
+                            precondition,
+                        )
+                        .await?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .map_err(error)?
+            .map_err(error)
     }
 
     fn append(&self, id: &str, item: T) -> Result<bool, StoreError> {

@@ -270,22 +270,29 @@ impl QueueStore for DriverQueueStore {
     }
 
     fn save(&self, state: &QueueState) -> Result<(), String> {
-        // Legacy snapshot import compatibility only. JobQueue production
-        // mutations use enqueue_item/claim_next/settle below.
-        for job in &state.pending {
-            let _ = self
-                .jobs
-                .append(&job.id, job.clone())
-                .map_err(|err| err.to_string())?;
-        }
+        // Compatibility snapshot replacement; live JobQueue processing uses
+        // enqueue_item/claim_next/settle and never replaces a snapshot.
+        self.jobs
+            .save(&state.pending)
+            .map_err(|err| err.to_string())?;
         let storage = self.jobs.storage().map_err(|err| err.to_string())?;
         let blocking = self.jobs.blocking.clone();
         let history = state.history.clone();
         blocking
             .run(async move {
-                let docs = storage.documents();
-                let counters = Counters::new(docs);
-                for run in history {
+                let docs = storage.documents().clone();
+                let mut query = Query::all().sort(Sort::asc("sequence")).limit(256);
+                loop {
+                    let page = docs.query_as::<StoredRun>(JOB_RUNS, &query).await?;
+                    for row in page.items {
+                        docs.delete(JOB_RUNS, &row.id, Precondition::Version(row.version))
+                            .await?;
+                    }
+                    let Some(cursor) = page.next else { break };
+                    query = query.after(cursor);
+                }
+                let counters = Counters::new(docs.as_ref());
+                for run in history.into_iter().rev() {
                     let sequence = counters.next("tinymemory", JOB_RUNS).await?;
                     let id = format!("{}-{sequence}", run.id);
                     docs.put_as(
