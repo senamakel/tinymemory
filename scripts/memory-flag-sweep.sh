@@ -11,7 +11,7 @@
 #   ./scripts/memory-flag-sweep.sh -- --only conflicts,surprise
 #
 # Arguments before `--` name profiles; after it, they go to the eval.
-# MODELS, CORTEXDB_VERSION and the model overrides pass through to
+# MODELS, CORTEXDB_IMAGE and the model overrides pass through to
 # memory-eval.sh. PARALLEL servers run at once, on ports from BASE_PORT up.
 # Reports, logs and summary.md land in OUT_DIR (target/memory-eval/flags).
 #

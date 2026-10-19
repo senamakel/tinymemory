@@ -125,8 +125,8 @@ deployment admits only the scope types in its policy's `allowed_scope_types`
 source` in every shipped preset) and refuses any other with `422
 UNREGISTERED_SCOPE_TYPE`, so a private type such as `tm:` would need every
 operator to register it first. `integration/cortexdb/` runs the engine against
-a real server (v0.10.4 by default; `CORTEXDB_VERSION=v0.9.9` checks the older
-release).
+a real server (official v0.8.21 image by default; set `CORTEXDB_IMAGE` to test
+another image).
 
 **Actor.** On the direct wire every request also carries `X-Cortex-Actor`,
 the caller `GET v1/auth/whoami` reports for the key (learned once per client,
