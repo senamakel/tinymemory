@@ -22,6 +22,8 @@ pub struct ItemClaim<T> {
     pub epoch: u64,
     /// Lease holder id.
     pub holder: String,
+    /// Position in a legacy list snapshot. Driver-backed stores ignore it.
+    pub(crate) position: usize,
     /// Store-specific opaque scope used for ack/nack.
     pub(crate) lease_key: String,
 }
@@ -60,22 +62,28 @@ pub trait ListStore<T>: Send + Sync {
     /// this drain and honoring its retry cutoff.
     fn claim_oldest(
         &self,
-        _excluded: &[String],
+        excluded: &[String],
         _eligible_at_ms: i64,
+        id_of: &dyn Fn(&T) -> String,
     ) -> Result<Option<ItemClaim<T>>, StoreError>
     where
         T: Clone,
     {
         let entries = self.load()?;
-        let Some(item) = entries.into_iter().next() else {
+        let Some((position, item)) = entries
+            .into_iter()
+            .enumerate()
+            .find(|(_, item)| !excluded.contains(&id_of(item)))
+        else {
             return Ok(None);
         };
         Ok(Some(ItemClaim {
-            id: String::new(),
+            id: id_of(&item),
             item,
             version: 0,
             epoch: 0,
             holder: String::new(),
+            position,
             lease_key: String::new(),
         }))
     }
@@ -83,10 +91,10 @@ pub trait ListStore<T>: Send + Sync {
     /// Acknowledge and remove a successfully processed item.
     fn acknowledge(&self, claim: &ItemClaim<T>) -> Result<bool, StoreError> {
         let mut entries = self.load()?;
-        if entries.is_empty() {
+        if entries.get(claim.position).is_none() {
             return Ok(false);
         }
-        entries.remove(0);
+        entries.remove(claim.position);
         self.save(&entries)?;
         let _ = claim;
         Ok(true)
@@ -100,10 +108,10 @@ pub trait ListStore<T>: Send + Sync {
         _not_before_ms: Option<i64>,
     ) -> Result<bool, StoreError> {
         let mut entries = self.load()?;
-        if entries.is_empty() {
+        if entries.get(claim.position).is_none() {
             return Ok(false);
         }
-        entries[0] = item;
+        entries[claim.position] = item;
         self.save(&entries)?;
         let _ = claim;
         Ok(true)

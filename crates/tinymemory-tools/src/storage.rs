@@ -64,8 +64,11 @@ pub struct QueueImportReport {
 static HOLDERS: AtomicU64 = AtomicU64::new(1);
 
 fn holder_id() -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
     format!(
-        "{}-{}",
+        "{}-{nonce}-{}",
         std::process::id(),
         HOLDERS.fetch_add(1, Ordering::Relaxed)
     )
@@ -138,8 +141,6 @@ impl DriverQueueStore {
         blocking
             .run(async move {
                 let docs = storage.documents().clone();
-                let count = i64::try_from(history.len())
-                    .map_err(|_| StorageError::invalid_input("legacy history is too large"))?;
                 let mut report = ImportReport::default();
                 for (index, run) in history.into_iter().enumerate() {
                     let body = serde_json::to_value(&run)?;
@@ -158,9 +159,9 @@ impl DriverQueueStore {
                             }
                         }
                         None => {
-                            let sequence = i64::try_from(index).map_err(|_| {
-                                StorageError::invalid_input("legacy order out of range")
-                            })? - count;
+                            let sequence = -i64::try_from(index)
+                                .map_err(|_| StorageError::invalid_input("legacy order out of range"))?
+                                - 1;
                             let value = StoredRun { sequence, run };
                             match docs
                                 .put_as(JOB_RUNS, &id, &value, Precondition::Absent)
@@ -258,6 +259,19 @@ impl DriverQueueStore {
                 precondition: Precondition::Absent,
                 options: WriteOptions::default(),
             }];
+            let history = docs
+                .query_as::<StoredRun>(JOB_RUNS, &Query::all().sort(Sort::desc("sequence")).limit(crate::queue::MAX_HISTORY))
+                .await?;
+            if history.items.len() == crate::queue::MAX_HISTORY {
+                let oldest = history.items.last().ok_or_else(|| {
+                    StorageError::backend("history page unexpectedly had no last row")
+                })?;
+                ops.push(WriteOp::Delete {
+                    collection: JOB_RUNS.to_owned(),
+                    id: oldest.id.clone(),
+                    precondition: Precondition::Version(oldest.version),
+                });
+            }
             match replacement {
                 Some(job) => {
                     let mut stored = current.doc;
@@ -660,6 +674,7 @@ where
                     version: claimed.version.0,
                     epoch: lease.epoch,
                     holder,
+                    position: 0,
                     lease_key,
                 }));
             }
@@ -809,6 +824,7 @@ where
         &self,
         excluded: &[String],
         eligible_at_ms: i64,
+        _id_of: &dyn Fn(&T) -> String,
     ) -> Result<Option<ItemClaim<T>>, StoreError> {
         self.claim_item(excluded.to_vec(), eligible_at_ms, |_| true)
     }

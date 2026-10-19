@@ -127,7 +127,7 @@ pub trait QueueStore: Send + Sync {
         excluded: &[String],
     ) -> Result<Option<(QueuedJob, ItemClaim<QueuedJob>)>, String> {
         let state = self.load();
-        let Some(job) = state.pending.into_iter().find(|job| {
+        let Some((position, job)) = state.pending.into_iter().enumerate().find(|(_, job)| {
             !excluded.iter().any(|id| id == &job.id)
                 && match selection {
                     Selection::Due => job.queued_at <= cutoff,
@@ -143,6 +143,7 @@ pub trait QueueStore: Send + Sync {
             version: 0,
             epoch: 0,
             holder: String::new(),
+            position,
             lease_key: String::new(),
         };
         Ok(Some((job, token)))
