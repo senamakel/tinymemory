@@ -174,7 +174,11 @@ where
 
     /// Import decoded legacy items without modifying their source. Stable ids
     /// are supplied by the reader, and imported rows sort before newer native
-    /// appends. Existing target rows are kept and conflicts are counted.
+    /// appends. Existing target rows are kept and conflicts are counted. Pass
+    /// each legacy snapshot as one ordered batch; if several source batches
+    /// feed the same queue, merge them in FIFO order before importing and make
+    /// ids stable across retries (for example, source identity plus occurrence
+    /// index). Repeated identical values still need distinct occurrence ids.
     pub fn import_items(
         &self,
         entries: impl IntoIterator<Item = (String, T)>,
@@ -220,12 +224,7 @@ where
                                 not_before_ms: None,
                             };
                             match documents
-                                .put_as(
-                                    collection,
-                                    &id,
-                                    &value,
-                                    Precondition::Absent,
-                                )
+                                .put_as(collection, &id, &value, Precondition::Absent)
                                 .await
                             {
                                 Ok(_) => report.imported += 1,
@@ -588,4 +587,3 @@ where
             .map_err(error)
     }
 }
-

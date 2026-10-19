@@ -9,6 +9,7 @@ use tinymemory_api::{LearningKind, MemoryMeta, Namespace, StoreItem};
 use tinystoragedrivers_core::schema::Registry;
 use tinystoragedrivers_core::{Blocking, MemoryStorage, Precondition, Scope, StorageBackend};
 
+use crate::deletion::{Backoff, DeletionExecutor, DeletionQueue, Drain, PendingDeletion};
 use crate::list_store::ListStore;
 use crate::pending::{Binding, Limits, PendingWrites, WriteExecutor, WriteGate, WriteOperation};
 use crate::queue::{JobQueue, Selection};
@@ -29,7 +30,10 @@ async fn backend(clock: Clock) -> Arc<dyn StorageBackend> {
     let backend: Arc<dyn StorageBackend> = Arc::new(MemoryStorage::with_clock(clock));
     let registry = Registry::compose([storage_schema().expect("valid TinyMemory schema")])
         .expect("schema composes");
-    registry.prepare(backend.as_ref()).await.expect("schema prepared");
+    registry
+        .prepare(backend.as_ref())
+        .await
+        .expect("schema prepared");
     backend
 }
 
@@ -66,6 +70,24 @@ fn readiness_store(
         clock,
         Duration::from_millis(10),
         |item| item.id.clone(),
+    )
+    .expect("store opened")
+}
+
+fn deletion_store(
+    backend: Arc<dyn StorageBackend>,
+    clock: Clock,
+) -> DriverListStore<PendingDeletion> {
+    DriverListStore::new(
+        backend,
+        Scope::local(),
+        DELETIONS,
+        clock,
+        Duration::from_secs(30),
+        |item| match item {
+            PendingDeletion::Thread { thread_id } => format!("thread:{thread_id}"),
+            PendingDeletion::Source { source_id } => format!("source:{source_id}"),
+        },
     )
     .expect("store opened")
 }
@@ -119,7 +141,10 @@ async fn claim_rereads_eligibility_after_candidate_scan() {
     let claimed = first
         .claim_item_with_hook(Vec::new(), i64::MAX, |item| item.ready, hook)
         .unwrap();
-    assert!(claimed.is_none(), "settled row is not claimed from stale snapshot");
+    assert!(
+        claimed.is_none(),
+        "settled row is not claimed from stale snapshot"
+    );
     assert!(!second.load().unwrap()[0].ready);
 }
 
@@ -142,16 +167,21 @@ async fn claim_write_is_fenced_if_lease_epoch_changes_after_acquisition() {
     let takeover = Arc::new(move |id: &str, point: super::list::ClaimPoint| {
         if id == "one" && matches!(point, super::list::ClaimPoint::LeaseAcquired) {
             now.store(2_011, Ordering::SeqCst);
-            assert!(second
-                .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
-                .unwrap()
-                .is_some());
+            assert!(
+                second
+                    .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
+                    .unwrap()
+                    .is_some()
+            );
         }
     });
     let stale_claim = first
         .claim_item_with_hook(Vec::new(), i64::MAX, |_| true, takeover)
         .unwrap();
-    assert!(stale_claim.is_none(), "expired lease owner cannot claim the row");
+    assert!(
+        stale_claim.is_none(),
+        "expired lease owner cannot claim the row"
+    );
 }
 
 #[tokio::test]
@@ -174,10 +204,12 @@ async fn driver_claims_are_exclusive_fenced_and_recover_after_expiry() {
         .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
         .unwrap()
         .expect("first consumer claims item");
-    assert!(second
-        .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
-        .unwrap()
-        .is_none());
+    assert!(
+        second
+            .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
+            .unwrap()
+            .is_none()
+    );
 
     now.store(1_011, Ordering::SeqCst);
     let reclaimed = second
@@ -395,3 +427,39 @@ async fn two_driver_pending_write_consumers_execute_a_healthy_item_once() {
     assert!(left.is_empty());
 }
 
+struct DeletionCounter(AtomicUsize);
+
+#[async_trait::async_trait]
+impl DeletionExecutor for DeletionCounter {
+    fn is_reachable(&self) -> bool {
+        true
+    }
+
+    async fn run(&self, _: &PendingDeletion) -> Result<usize, String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(1)
+    }
+}
+
+#[tokio::test]
+async fn two_driver_deletion_consumers_execute_a_healthy_item_once() {
+    let (clock, _) = clock_at(40_000);
+    let backend = backend(clock.clone()).await;
+    let left = DeletionQueue::new(
+        deletion_store(Arc::clone(&backend), clock.clone()),
+        Backoff::default(),
+    );
+    let right = DeletionQueue::new(deletion_store(backend, clock), Backoff::default());
+    left.enqueue(PendingDeletion::Thread {
+        thread_id: "thread-one".into(),
+    });
+    let executor = DeletionCounter(AtomicUsize::new(0));
+
+    let (left_count, right_count) = tokio::join!(
+        left.drain(&executor, Drain::Force, chrono::Utc::now()),
+        right.drain(&executor, Drain::Force, chrono::Utc::now()),
+    );
+    assert_eq!(left_count + right_count, 1);
+    assert_eq!(executor.0.load(Ordering::SeqCst), 1);
+    assert!(left.pending().is_empty());
+}
