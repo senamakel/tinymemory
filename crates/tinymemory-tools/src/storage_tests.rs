@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tinymemory_api::conformance::ReferenceEngine;
-use tinymemory_api::{LearningKind, MemoryEngine, MemoryMeta, Namespace, StoreItem};
+use tinymemory_api::{LearningKind, MemoryMeta, Namespace, StoreItem};
 use tinystoragedrivers_core::schema::Registry;
 use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
 
 use crate::list_store::ListStore;
-use crate::pending::{Binding, Entry, Limits, PendingWrites, WriteExecutor, WriteGate, WriteOperation};
+use crate::pending::{Binding, Limits, PendingWrites, WriteExecutor, WriteGate, WriteOperation};
 use crate::queue::{JobQueue, Selection};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,7 +255,3 @@ async fn two_driver_pending_write_consumers_execute_a_healthy_item_once() {
     assert!(left.is_empty());
 }
 
-#[allow(dead_code)]
-fn _entry_shape_proof(entry: Entry) -> Entry {
-    entry
-}
