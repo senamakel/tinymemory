@@ -12,6 +12,10 @@ use tinystoragedrivers_core::{Owner, ScopeClass, StorageError, schema::Schema};
 mod list;
 mod queue_store;
 
+#[cfg(all(test, feature = "storage"))]
+#[path = "storage_tests.rs"]
+mod tests;
+
 pub use list::DriverListStore;
 pub(super) use list::Stored;
 pub use queue_store::{DriverQueueStore, QueueImportReport};
