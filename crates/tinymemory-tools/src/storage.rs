@@ -216,6 +216,7 @@ impl DriverQueueStore {
         claim: &ItemClaim<QueuedJob>,
         replacement: Option<QueuedJob>,
         run: JobRun,
+        follow_ups: Vec<QueuedJob>,
     ) -> Result<bool, String> {
         let storage = self.jobs.storage().map_err(|err| err.to_string())?;
         let documents = storage.documents().clone();
@@ -275,6 +276,26 @@ impl DriverQueueStore {
                     id,
                     precondition: Precondition::Version(job_version),
                 }),
+            }
+            let counters = Counters::new(docs);
+            for job in follow_ups {
+                if docs.get(collection, &job.id).await?.is_some() {
+                    continue;
+                }
+                let sequence = i64::try_from(counters.next("tinymemory", collection).await?)
+                    .map_err(|_| StorageError::invalid_input("queue sequence out of range"))?;
+                ops.push(WriteOp::Put {
+                    collection: collection.to_owned(),
+                    id: job.id.clone(),
+                    doc: serde_json::to_value(Stored {
+                        sequence,
+                        item: job,
+                        claimed_epoch: 0,
+                        not_before_ms: None,
+                    })?,
+                    precondition: Precondition::Absent,
+                    options: WriteOptions::default(),
+                });
             }
             docs.atomic_batch(ops).await?;
             let _ = leases
@@ -357,8 +378,9 @@ impl QueueStore for DriverQueueStore {
         claim: &ItemClaim<QueuedJob>,
         replacement: Option<QueuedJob>,
         run: JobRun,
+        follow_ups: Vec<QueuedJob>,
     ) -> Result<bool, String> {
-        self.settle_claim(claim, replacement, run)
+        self.settle_claim(claim, replacement, run, follow_ups)
     }
 }
 

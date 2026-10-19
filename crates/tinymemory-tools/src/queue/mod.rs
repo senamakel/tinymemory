@@ -215,7 +215,6 @@ impl<S: QueueStore> JobQueue<S> {
                     );
                     if entry.attempts < MAX_ATTEMPTS {
                         record.reason = Some(error.to_string());
-                        state.pending.push(entry);
                     } else {
                         record.reason = Some(format!(
                             "dropped after {MAX_ATTEMPTS} failed attempts: {error}"
@@ -230,19 +229,24 @@ impl<S: QueueStore> JobQueue<S> {
             };
             let settled = self
                 .store
-                .settle(&claim, replacement, record.clone())
+                .settle(
+                    &claim,
+                    replacement,
+                    record.clone(),
+                    if record.outcome == "failed" {
+                        Vec::new()
+                    } else {
+                        follow_ups
+                            .into_iter()
+                            .map(|job| queued(&entry.root, job))
+                            .collect()
+                    },
+                )
                 .map_err(QueueError::StoreUnavailable)?;
             if !settled {
                 return Err(QueueError::StoreUnavailable(
                     "the claimed job changed before settlement".into(),
                 ));
-            }
-            if record.outcome != "failed" {
-                // Follow-ups are separate idempotent items, never part of a
-                // whole-queue read/modify/write.
-                for follow_up in follow_ups {
-                    let _ = self.store.enqueue_item(queued(&entry.root, follow_up));
-                }
             }
             runs.push(record);
             if matches!(selection, Selection::One(_)) {

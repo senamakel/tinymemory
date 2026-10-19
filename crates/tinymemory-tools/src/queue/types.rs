@@ -156,6 +156,7 @@ pub trait QueueStore: Send + Sync {
         claim: &ItemClaim<QueuedJob>,
         replacement: Option<QueuedJob>,
         run: JobRun,
+        follow_ups: Vec<QueuedJob>,
     ) -> Result<bool, String> {
         let mut state = self.load();
         let Some(index) = state.pending.iter().position(|job| job.id == claim.id) else {
@@ -168,6 +169,11 @@ pub trait QueueStore: Send + Sync {
         }
         state.history.insert(0, run);
         state.history.truncate(MAX_HISTORY);
+        for follow_up in follow_ups {
+            if !state.pending.iter().any(|known| known.id == follow_up.id) {
+                state.pending.push(follow_up);
+            }
+        }
         self.save(&state)?;
         Ok(true)
     }
