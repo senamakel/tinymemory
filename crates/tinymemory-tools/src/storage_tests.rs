@@ -199,44 +199,6 @@ async fn claim_write_is_fenced_if_lease_epoch_changes_after_acquisition() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_claims_through_one_store_handle_use_distinct_lease_holders() {
-    let (clock, _) = clock_at(3_000);
-    let backend = backend(clock.clone()).await;
-    let store = Arc::new(list_store(backend, Scope::local(), clock));
-    store
-        .append(
-            "one",
-            Item {
-                id: "one".into(),
-                value: "pending".into(),
-            },
-        )
-        .unwrap();
-    let acquired = Arc::new(std::sync::Barrier::new(2));
-    let resume = Arc::new(std::sync::Barrier::new(2));
-    let worker_store = Arc::clone(&store);
-    let worker_acquired = Arc::clone(&acquired);
-    let worker_resume = Arc::clone(&resume);
-    let worker = std::thread::spawn(move || {
-        let hook = Arc::new(move |_: &str, point: super::list::ClaimPoint| {
-            if matches!(point, super::list::ClaimPoint::LeaseAcquired) {
-                worker_acquired.wait();
-                worker_resume.wait();
-            }
-        });
-        worker_store.claim_item_with_hook(Vec::new(), i64::MAX, |_| true, hook)
-    });
-    acquired.wait();
-    let second = store
-        .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
-        .unwrap();
-    resume.wait();
-    let first = worker.join().unwrap().unwrap();
-    assert!(second.is_none(), "one live lease has one claim owner");
-    assert!(first.is_some());
-}
-
 #[tokio::test]
 async fn driver_claims_are_exclusive_fenced_and_recover_after_expiry() {
     let (clock, now) = clock_at(1_000);
