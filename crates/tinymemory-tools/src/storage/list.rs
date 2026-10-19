@@ -39,7 +39,6 @@ pub struct DriverListStore<T> {
     pub(super) scope: Scope,
     pub(super) blocking: Blocking,
     pub(super) clock: Clock,
-    holder: String,
     collection: &'static str,
     pub(super) lease_ms: i64,
     id_of: Arc<dyn Fn(&T) -> String + Send + Sync>,
@@ -82,7 +81,6 @@ where
             scope,
             blocking,
             clock,
-            holder: holder_id(),
             collection,
             lease_ms,
             id_of: Arc::new(id_of),
@@ -274,7 +272,9 @@ where
         let backend = Arc::clone(&self.backend);
         let scope = self.scope.clone();
         let collection = self.collection;
-        let holder = self.holder.clone();
+        // A unique holder per acquisition prevents concurrent claims through
+        // the same store handle from treating one lease as both workers.
+        let holder = holder_id();
         let lease_ms = self.lease_ms;
         let candidates = Self::all_documents(Arc::clone(&documents), collection);
         self.run(async move {
