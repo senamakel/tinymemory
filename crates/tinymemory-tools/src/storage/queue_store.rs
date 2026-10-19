@@ -1,5 +1,6 @@
 //! Driver-backed background job queue adapter.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +18,8 @@ use super::list::Stored;
 use super::{
     DriverListStore, ImportReport, JOB_RUNS, JOBS, QueueImportReport, error, system_clock,
 };
+
+const MAX_SETTLEMENT_ATTEMPTS: usize = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredRun {
@@ -167,8 +170,23 @@ impl DriverQueueStore {
         replacement: Option<QueuedJob>,
         run: JobRun,
         follow_ups: Vec<QueuedJob>,
-        after_history_snapshot: Option<Box<dyn FnOnce() + Send>>,
+        after_history_snapshot: Option<Box<dyn FnMut() + Send>>,
     ) -> Result<bool, String> {
+        let mut unique_follow_ups = HashMap::new();
+        let mut ordered_follow_ups = Vec::new();
+        for job in follow_ups {
+            match unique_follow_ups.get(&job.id) {
+                Some(existing) if existing != &job => {
+                    return Err(format!("conflicting follow-up jobs share id `{}`", job.id));
+                }
+                Some(_) => {}
+                None => {
+                    unique_follow_ups.insert(job.id.clone(), job.clone());
+                    ordered_follow_ups.push(job);
+                }
+            }
+        }
+        let follow_ups = ordered_follow_ups;
         let storage = self.jobs.storage().map_err(|err| err.to_string())?;
         let documents = storage.documents().clone();
         let leases = Leases::new(&documents).with_clock(self.jobs.clock.clone());
@@ -184,6 +202,7 @@ impl DriverQueueStore {
         let run_id = format!("{}-{epoch}", claim.id);
         let result = self.jobs.run(async move {
             let mut after_history_snapshot = after_history_snapshot;
+            let mut attempts = 0;
             loop {
                 let Some(lease) = leases
                     .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl_ms)
@@ -223,7 +242,7 @@ impl DriverQueueStore {
                             .limit(crate::queue::MAX_HISTORY),
                     )
                     .await?;
-                if let Some(hook) = after_history_snapshot.take() {
+                if let Some(hook) = after_history_snapshot.as_mut() {
                     hook();
                 }
                 if history.items.len() == crate::queue::MAX_HISTORY {
@@ -280,7 +299,14 @@ impl DriverQueueStore {
                             .await?;
                         return Ok::<bool, StorageError>(true);
                     }
-                    Err(error) if error.kind() == ErrorKind::Conflict => continue,
+                    Err(error) if error.kind() == ErrorKind::Conflict => {
+                        attempts += 1;
+                        if attempts >= MAX_SETTLEMENT_ATTEMPTS {
+                            return Err(StorageError::conflict(format!(
+                                "queue settlement remained conflicting after {attempts} attempts"
+                            )));
+                        }
+                    }
                     Err(error) => return Err(error),
                 }
             }

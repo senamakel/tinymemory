@@ -25,6 +25,7 @@ pub struct ItemClaim<T> {
     /// Position in a legacy list snapshot. Driver-backed stores ignore it.
     pub(crate) position: usize,
     /// Store-specific opaque scope used for ack/nack.
+    #[cfg(feature = "storage")]
     pub(crate) lease_key: String,
 }
 
@@ -87,6 +88,7 @@ pub trait ListStore<T>: Send + Sync {
             epoch: 0,
             holder: String::new(),
             position,
+            #[cfg(feature = "storage")]
             lease_key: String::new(),
         }))
     }

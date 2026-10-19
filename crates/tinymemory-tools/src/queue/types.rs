@@ -146,6 +146,7 @@ pub trait QueueStore: Send + Sync {
             epoch: 0,
             holder: String::new(),
             position,
+            #[cfg(feature = "storage")]
             lease_key: String::new(),
         };
         Ok(Some((job, token)))
