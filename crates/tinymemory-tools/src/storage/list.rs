@@ -266,7 +266,8 @@ where
             dyn Fn(
                     &str,
                     ClaimPoint,
-                ) -> Pin<Box<dyn std::future::Future<Output = Result<(), StorageError>> + Send>>
+                )
+                    -> Pin<Box<dyn std::future::Future<Output = Result<(), StorageError>> + Send>>
                 + Send
                 + Sync,
         >,

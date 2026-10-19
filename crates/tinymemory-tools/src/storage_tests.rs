@@ -3,13 +3,15 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+use std::{future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 use tinymemory_api::conformance::ReferenceEngine;
 use tinymemory_api::{LearningKind, MemoryMeta, Namespace, StoreItem};
 use tinystoragedrivers_core::schema::Registry;
 use tinystoragedrivers_core::{
-    Blocking, Clock, DocumentStoreExt, MemoryStorage, Precondition, Scope, StorageBackend,
+    Clock, DocumentStoreExt, Leases, MemoryStorage, Precondition, Scope, StorageBackend,
+    StorageError,
 };
 
 use crate::deletion::{Backoff, DeletionExecutor, DeletionQueue, Drain, PendingDeletion};
@@ -127,14 +129,15 @@ async fn claim_rereads_eligibility_after_candidate_scan() {
         .unwrap();
 
     let update_backend = Arc::clone(&backend);
-    let update_blocking = Blocking::new().unwrap();
-    let hook = Arc::new(move |id: &str, point: super::list::ClaimPoint| {
-        if id != "same-row" || !matches!(point, super::list::ClaimPoint::CandidateRead) {
-            return;
-        }
-        let backend = Arc::clone(&update_backend);
-        update_blocking
-            .run(async move {
+    let hook = Arc::new(
+        move |id: &str,
+              point: super::list::ClaimPoint|
+              -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send>> {
+            if id != "same-row" || !matches!(point, super::list::ClaimPoint::CandidateRead) {
+                return Box::pin(async { Ok(()) });
+            }
+            let backend = Arc::clone(&update_backend);
+            Box::pin(async move {
                 let docs = backend.for_scope(&Scope::local())?.documents().clone();
                 let current = docs
                     .get_as::<super::list::Stored<ReadinessItem>>(TOOL_WRITES, "same-row")
@@ -150,11 +153,10 @@ async fn claim_rereads_eligibility_after_candidate_scan() {
                     Precondition::Version(version),
                 )
                 .await?;
-                Ok::<_, tinystoragedrivers_core::StorageError>(())
+                Ok(())
             })
-            .unwrap()
-            .unwrap();
-    });
+        },
+    );
 
     let claimed = first
         .claim_item_with_hook(Vec::new(), i64::MAX, |item| item.ready, hook)
@@ -171,7 +173,6 @@ async fn claim_write_is_fenced_if_lease_epoch_changes_after_acquisition() {
     let (clock, now) = clock_at(2_000);
     let backend = backend(clock.clone()).await;
     let first = list_store(Arc::clone(&backend), Scope::local(), clock.clone());
-    let second = list_store(Arc::clone(&backend), Scope::local(), clock);
     first
         .append(
             "one",
@@ -182,17 +183,34 @@ async fn claim_write_is_fenced_if_lease_epoch_changes_after_acquisition() {
         )
         .unwrap();
 
-    let takeover = Arc::new(move |id: &str, point: super::list::ClaimPoint| {
-        if id == "one" && matches!(point, super::list::ClaimPoint::LeaseAcquired) {
-            now.store(2_011, Ordering::SeqCst);
-            assert!(
-                second
-                    .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
-                    .unwrap()
-                    .is_some()
-            );
-        }
-    });
+    let takeover_backend = Arc::clone(&backend);
+    let takeover_clock = clock.clone();
+    let takeover = Arc::new(
+        move |id: &str,
+              point: super::list::ClaimPoint|
+              -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send>> {
+            if id == "one" && matches!(point, super::list::ClaimPoint::LeaseAcquired) {
+                now.store(2_011, Ordering::SeqCst);
+                let backend = Arc::clone(&takeover_backend);
+                let clock = takeover_clock.clone();
+                return Box::pin(async move {
+                    let documents = backend.for_scope(&Scope::local())?.documents().clone();
+                    let acquired = Leases::new(&documents)
+                        .with_clock(clock)
+                        .acquire(
+                            "tinymemory.queue",
+                            "tinymemory.tool_writes:one",
+                            "takeover",
+                            10,
+                        )
+                        .await?;
+                    assert!(acquired.is_some(), "expired claim lease can be taken over");
+                    Ok(())
+                });
+            }
+            Box::pin(async { Ok(()) })
+        },
+    );
     let stale_claim = first
         .claim_item_with_hook(Vec::new(), i64::MAX, |_| true, takeover)
         .unwrap();
