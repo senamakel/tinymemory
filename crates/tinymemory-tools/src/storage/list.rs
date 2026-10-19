@@ -477,61 +477,10 @@ where
     }
 
     fn save(&self, entries: &[T]) -> Result<(), StoreError> {
-        let mut ids = Vec::with_capacity(entries.len());
-        for item in entries {
-            let id = (self.id_of)(item);
-            if ids.contains(&id) {
-                return Err(StoreError("list item ids must be unique".into()));
-            }
-            ids.push(id);
-        }
-        let storage = self.storage()?;
-        let blocking = self.blocking.clone();
-        let collection = self.collection;
-        let owner = collection.to_owned();
-        let entries = entries.to_vec();
-        let id_of = Arc::clone(&self.id_of);
-        blocking
-            .run(async move {
-                let documents = storage.documents().clone();
-                for row in Self::all_documents(Arc::clone(&documents), collection).await? {
-                    if !ids.contains(&row.id) {
-                        documents
-                            .delete(collection, &row.id, Precondition::Version(row.version))
-                            .await?;
-                    }
-                }
-                let counters = Counters::new(&documents);
-                for item in entries {
-                    let id = id_of(&item);
-                    let existing = documents.get_as::<Stored<T>>(collection, &id).await?;
-                    let sequence = i64::try_from(counters.next("tinymemory", &owner).await?)
-                        .map_err(|_| StorageError::invalid_input("queue sequence out of range"))?;
-                    let (precondition, claimed_epoch) = match existing {
-                        Some(existing) => (
-                            Precondition::Version(existing.version),
-                            existing.doc.claimed_epoch,
-                        ),
-                        None => (Precondition::Absent, 0),
-                    };
-                    documents
-                        .put_as(
-                            collection,
-                            &id,
-                            &Stored {
-                                sequence,
-                                item,
-                                claimed_epoch,
-                                not_before_ms: None,
-                            },
-                            precondition,
-                        )
-                        .await?;
-                }
-                Ok::<_, StorageError>(())
-            })
-            .map_err(error)?
-            .map_err(error)
+        let _ = entries;
+        Err(StoreError(
+            "snapshot replacement is unsupported for driver-backed queues; use append, claim/ack/retry, or import_items".into(),
+        ))
     }
 
     fn append(&self, id: &str, item: T) -> Result<bool, StoreError> {
