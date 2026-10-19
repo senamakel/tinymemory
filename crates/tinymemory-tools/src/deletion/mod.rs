@@ -224,7 +224,7 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
                         .get(*deletion)
                         .is_some_and(|retry| retry.not_before > now)
                 })
-                .map(|deletion| deletion_id(deletion))
+                .map(deletion_id)
                 .collect()
         } else {
             Vec::new()

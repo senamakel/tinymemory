@@ -40,6 +40,10 @@ impl std::fmt::Debug for DriverQueueStore {
 
 impl DriverQueueStore {
     /// Open the driver-backed job queue for one scope.
+    ///
+    /// # Errors
+    /// Returns an error if the lease duration is invalid or the backend
+    /// cannot open its blocking bridge.
     pub fn new(
         backend: Arc<dyn StorageBackend>,
         scope: Scope,
@@ -54,6 +58,9 @@ impl DriverQueueStore {
     }
 
     /// Open with the standard system clock and a 30-second visibility lease.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::new`].
     pub fn system_clock(
         backend: Arc<dyn StorageBackend>,
         scope: Scope,
@@ -69,6 +76,9 @@ impl DriverQueueStore {
     /// Import a decoded legacy snapshot without changing its source file.
     /// Stable job ids are retained, duplicate imports are harmless, and
     /// conflicting target rows win and are reported.
+    ///
+    /// # Errors
+    /// Returns an error when a source item cannot be serialized or imported.
     pub fn import_legacy(&self, state: &QueueState) -> Result<QueueImportReport, StoreError> {
         let jobs = self.jobs.import_items(
             state

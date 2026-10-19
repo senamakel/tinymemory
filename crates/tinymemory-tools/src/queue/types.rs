@@ -109,6 +109,9 @@ pub trait QueueStore: Send + Sync {
     /// Enqueue a single job. Driver-backed stores override this with an
     /// insert into that job's document; the default preserves older local
     /// stores.
+    ///
+    /// # Errors
+    /// Returns the underlying snapshot save error.
     fn enqueue_item(&self, job: QueuedJob) -> Result<bool, String> {
         let mut state = self.load();
         if state.pending.iter().any(|known| known.id == job.id) {
@@ -122,6 +125,9 @@ pub trait QueueStore: Send + Sync {
     /// Claim one matching job in FIFO order. `excluded` prevents one run call
     /// from retrying a failed job repeatedly. Durable stores override this
     /// with an atomic document claim and visibility lease.
+    ///
+    /// # Errors
+    /// Returns an error when the queue provider cannot read or claim a job.
     fn claim_next(
         &self,
         selection: &Selection,
@@ -155,6 +161,9 @@ pub trait QueueStore: Send + Sync {
     /// Settle one claimed job and add its history record. `replacement` keeps
     /// a failed job queued; `None` acknowledges it. Durable stores perform
     /// the job mutation and history insert through fenced item operations.
+    ///
+    /// # Errors
+    /// Returns an error when the provider cannot atomically settle the claim.
     fn settle(
         &self,
         claim: &ItemClaim<QueuedJob>,

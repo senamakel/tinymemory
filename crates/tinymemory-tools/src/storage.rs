@@ -29,7 +29,9 @@ pub const TOOL_WRITES: &str = "tinymemory.tool_writes";
 pub const DELETIONS: &str = "tinymemory.deletions";
 
 /// TinyMemory queue collections. TSD adds its lease and counter collections.
-#[must_use]
+///
+/// # Errors
+/// Returns an error if the built-in owner or collection identifiers are invalid.
 pub fn storage_schema() -> Result<Schema, StorageError> {
     Ok(Schema::new(Owner::new("tinymemory")?)
         .collection(JOBS, 1, ScopeClass::Tenant)

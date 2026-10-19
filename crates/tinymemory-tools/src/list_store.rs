@@ -29,6 +29,27 @@ pub struct ItemClaim<T> {
     pub(crate) lease_key: String,
 }
 
+impl<T> ItemClaim<T> {
+    /// Create a claim token for a custom queue provider.
+    ///
+    /// `version`, `epoch`, and `holder` are provider-owned fencing data; a
+    /// provider should validate them when acknowledging or retrying the item.
+    /// The legacy position and native TSD lease key are initialized privately.
+    #[must_use]
+    pub fn new(id: String, item: T, version: u64, epoch: u64, holder: String) -> Self {
+        Self {
+            id,
+            item,
+            version,
+            epoch,
+            holder,
+            position: 0,
+            #[cfg(feature = "storage")]
+            lease_key: String::new(),
+        }
+    }
+}
+
 /// Where the host keeps one queue's entries (a file, a document, a stream),
 /// in order, oldest first.
 ///
@@ -55,6 +76,9 @@ pub trait ListStore<T>: Send + Sync {
     ///
     /// The default keeps compatibility with older local stores. Durable
     /// multi-consumer stores override this with an item-level insert.
+    ///
+    /// # Errors
+    /// Returns the load or save error from the underlying store.
     fn append(&self, _id: &str, item: T) -> Result<bool, StoreError> {
         let mut entries = self.load()?;
         entries.push(item);
@@ -64,6 +88,9 @@ pub trait ListStore<T>: Send + Sync {
 
     /// Claim the oldest available item, excluding ids already inspected by
     /// this drain and honoring its retry cutoff.
+    ///
+    /// # Errors
+    /// Returns the load error from the underlying store.
     fn claim_oldest(
         &self,
         excluded: &[String],
@@ -94,6 +121,9 @@ pub trait ListStore<T>: Send + Sync {
     }
 
     /// Acknowledge and remove a successfully processed item.
+    ///
+    /// # Errors
+    /// Returns the load or save error from the underlying store.
     fn acknowledge(&self, claim: &ItemClaim<T>) -> Result<bool, StoreError> {
         let mut entries = self.load()?;
         if entries.get(claim.position).is_none() {
@@ -106,6 +136,9 @@ pub trait ListStore<T>: Send + Sync {
     }
 
     /// Retain an item after failure, recording an optional retry deadline.
+    ///
+    /// # Errors
+    /// Returns the load or save error from the underlying store.
     fn retry(
         &self,
         claim: &ItemClaim<T>,
@@ -123,12 +156,18 @@ pub trait ListStore<T>: Send + Sync {
     }
 
     /// Remove one item by its stable id, used for erasure fencing.
+    ///
+    /// # Errors
+    /// Returns an error if removal could not be completed.
     fn remove(&self, _id: &str) -> Result<bool, StoreError> {
         Ok(false)
     }
 
     /// Remove items matched by an owner predicate. Driver stores should
     /// override `remove` for stable-id compare-and-delete semantics.
+    ///
+    /// # Errors
+    /// Returns the load or save error from the underlying store.
     fn remove_matching(&self, predicate: &dyn Fn(&T) -> bool) -> Result<usize, StoreError> {
         let mut entries = self.load()?;
         let before = entries.len();

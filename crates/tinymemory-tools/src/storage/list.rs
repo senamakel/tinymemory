@@ -17,6 +17,15 @@ use crate::list_store::{ItemClaim, ListStore, StoreError};
 
 use super::{ImportReport, error, holder_id, system_clock};
 
+type ClaimHook = Arc<
+    dyn Fn(
+            &str,
+            ClaimPoint,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), StorageError>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Stored<T> {
     pub(super) sequence: i64,
@@ -64,6 +73,10 @@ where
     /// `id_of` must return a stable, unique id for this occurrence. In
     /// particular, callers importing a FIFO file must supply occurrence ids
     /// so identical values at distinct positions remain distinct.
+    ///
+    /// # Errors
+    /// Returns an error when the lease duration is invalid or the backend
+    /// cannot open its blocking bridge.
     pub fn new(
         backend: Arc<dyn StorageBackend>,
         scope: Scope,
@@ -90,6 +103,9 @@ where
     }
 
     /// Use the TSD system clock and a 30-second visibility lease.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::new`].
     pub fn system_clock(
         backend: Arc<dyn StorageBackend>,
         scope: Scope,
@@ -169,6 +185,9 @@ where
     /// feed the same queue, merge them in FIFO order before importing and make
     /// ids stable across retries (for example, source identity plus occurrence
     /// index). Repeated identical values still need distinct occurrence ids.
+    ///
+    /// # Errors
+    /// Returns a storage error when an item cannot be serialized or imported.
     pub fn import_items(
         &self,
         entries: impl IntoIterator<Item = (String, T)>,
@@ -262,15 +281,7 @@ where
         excluded: Vec<String>,
         eligible_at_ms: i64,
         eligible: impl Fn(&T) -> bool + Send + Sync + 'static,
-        hook: Arc<
-            dyn Fn(
-                    &str,
-                    ClaimPoint,
-                )
-                    -> Pin<Box<dyn std::future::Future<Output = Result<(), StorageError>> + Send>>
-                + Send
-                + Sync,
-        >,
+        hook: ClaimHook,
     ) -> Result<Option<ItemClaim<T>>, StoreError> {
         let documents = self.storage()?.documents().clone();
         let leases = Leases::new(&documents).with_clock(self.clock.clone());
@@ -384,6 +395,9 @@ where
     /// Claim the first stored item satisfying a caller's typed eligibility
     /// rule. The predicate only filters the read candidates; item ownership
     /// is still acquired through TSD leases and an atomic document claim.
+    ///
+    /// # Errors
+    /// Returns an error when candidate reads, leases, or fenced claims fail.
     pub fn claim_matching(
         &self,
         excluded: &[String],
