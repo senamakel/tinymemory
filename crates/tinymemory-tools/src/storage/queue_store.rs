@@ -158,6 +158,17 @@ impl DriverQueueStore {
         run: JobRun,
         follow_ups: Vec<QueuedJob>,
     ) -> Result<bool, String> {
+        self.settle_claim_after_history_snapshot(claim, replacement, run, follow_ups, None)
+    }
+
+    pub(super) fn settle_claim_after_history_snapshot(
+        &self,
+        claim: &ItemClaim<QueuedJob>,
+        replacement: Option<QueuedJob>,
+        run: JobRun,
+        follow_ups: Vec<QueuedJob>,
+        after_history_snapshot: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<bool, String> {
         let storage = self.jobs.storage().map_err(|err| err.to_string())?;
         let documents = storage.documents().clone();
         let leases = Leases::new(&documents).with_clock(self.jobs.clock.clone());
@@ -172,91 +183,107 @@ impl DriverQueueStore {
         let ttl_ms = self.jobs.lease_ms;
         let run_id = format!("{}-{epoch}", claim.id);
         let result = self.jobs.run(async move {
-            let Some(lease) = leases
-                .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl_ms)
-                .await?
-            else {
-                return Ok::<bool, StorageError>(false);
-            };
-            let fenced = backend.for_scope_fenced(&scope, &lease.fence(&scope))?;
-            let docs = fenced.documents();
-            let current = docs
-                .get_as::<Stored<QueuedJob>>(collection, &id)
-                .await?
-                .ok_or_else(|| StorageError::conflict("claimed job disappeared"))?;
-            if current.version != job_version {
-                return Ok::<bool, StorageError>(false);
-            }
-            let sequence =
-                i64::try_from(Counters::new(docs).next("tinymemory", JOB_RUNS).await?)
-                    .map_err(|_| StorageError::invalid_input("history sequence out of range"))?;
-            let run_doc = serde_json::to_value(StoredRun { sequence, run })?;
-            let mut ops = vec![WriteOp::Put {
-                collection: JOB_RUNS.to_owned(),
-                id: run_id,
-                doc: run_doc,
-                precondition: Precondition::Absent,
-            }];
-            let history = docs
-                .query_as::<StoredRun>(
-                    JOB_RUNS,
-                    &Query::all()
-                        .sort(Sort::desc("sequence"))
-                        .limit(crate::queue::MAX_HISTORY),
-                )
-                .await?;
-            if history.items.len() == crate::queue::MAX_HISTORY {
-                let oldest = history.items.last().ok_or_else(|| {
-                    StorageError::backend("history page unexpectedly had no last row")
+            let mut after_history_snapshot = after_history_snapshot;
+            loop {
+                let Some(lease) = leases
+                    .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl_ms)
+                    .await?
+                else {
+                    return Ok::<bool, StorageError>(false);
+                };
+                let fenced = backend.for_scope_fenced(&scope, &lease.fence(&scope))?;
+                let docs = fenced.documents();
+                let current = docs
+                    .get_as::<Stored<QueuedJob>>(collection, &id)
+                    .await?
+                    .ok_or_else(|| StorageError::conflict("claimed job disappeared"))?;
+                if current.version != job_version {
+                    return Ok::<bool, StorageError>(false);
+                }
+                let sequence =
+                    i64::try_from(Counters::new(docs).next("tinymemory", JOB_RUNS).await?)
+                        .map_err(|_| {
+                            StorageError::invalid_input("history sequence out of range")
+                        })?;
+                let run_doc = serde_json::to_value(StoredRun {
+                    sequence,
+                    run: run.clone(),
                 })?;
-                ops.push(WriteOp::Delete {
+                let mut ops = vec![WriteOp::Put {
                     collection: JOB_RUNS.to_owned(),
-                    id: oldest.id.clone(),
-                    precondition: Precondition::Version(oldest.version),
-                });
-            }
-            match replacement {
-                Some(job) => {
-                    let mut stored = current.doc;
-                    stored.item = job;
-                    stored.claimed_epoch = epoch;
-                    ops.push(WriteOp::Put {
-                        collection: collection.to_owned(),
-                        id,
-                        doc: serde_json::to_value(stored)?,
-                        precondition: Precondition::Version(job_version),
+                    id: run_id.clone(),
+                    doc: run_doc,
+                    precondition: Precondition::Absent,
+                }];
+                let history = docs
+                    .query_as::<StoredRun>(
+                        JOB_RUNS,
+                        &Query::all()
+                            .sort(Sort::desc("sequence"))
+                            .limit(crate::queue::MAX_HISTORY),
+                    )
+                    .await?;
+                if let Some(hook) = after_history_snapshot.take() {
+                    hook();
+                }
+                if history.items.len() == crate::queue::MAX_HISTORY {
+                    let oldest = history.items.last().ok_or_else(|| {
+                        StorageError::backend("history page unexpectedly had no last row")
+                    })?;
+                    ops.push(WriteOp::Delete {
+                        collection: JOB_RUNS.to_owned(),
+                        id: oldest.id.clone(),
+                        precondition: Precondition::Version(oldest.version),
                     });
                 }
-                None => ops.push(WriteOp::Delete {
-                    collection: collection.to_owned(),
-                    id,
-                    precondition: Precondition::Version(job_version),
-                }),
-            }
-            let counters = Counters::new(docs);
-            for job in follow_ups {
-                if docs.get(collection, &job.id).await?.is_some() {
-                    continue;
+                match replacement.clone() {
+                    Some(job) => {
+                        let mut stored = current.doc;
+                        stored.item = job;
+                        stored.claimed_epoch = epoch;
+                        ops.push(WriteOp::Put {
+                            collection: collection.to_owned(),
+                            id: id.clone(),
+                            doc: serde_json::to_value(stored)?,
+                            precondition: Precondition::Version(job_version),
+                        });
+                    }
+                    None => ops.push(WriteOp::Delete {
+                        collection: collection.to_owned(),
+                        id: id.clone(),
+                        precondition: Precondition::Version(job_version),
+                    }),
                 }
-                let sequence = i64::try_from(counters.next("tinymemory", collection).await?)
-                    .map_err(|_| StorageError::invalid_input("queue sequence out of range"))?;
-                ops.push(WriteOp::Put {
-                    collection: collection.to_owned(),
-                    id: job.id.clone(),
-                    doc: serde_json::to_value(Stored {
-                        sequence,
-                        item: job,
-                        claimed_epoch: 0,
-                        not_before_ms: None,
-                    })?,
-                    precondition: Precondition::Absent,
-                });
+                let counters = Counters::new(docs);
+                for job in follow_ups.iter().cloned() {
+                    if docs.get(collection, &job.id).await?.is_some() {
+                        continue;
+                    }
+                    let sequence = i64::try_from(counters.next("tinymemory", collection).await?)
+                        .map_err(|_| StorageError::invalid_input("queue sequence out of range"))?;
+                    ops.push(WriteOp::Put {
+                        collection: collection.to_owned(),
+                        id: job.id.clone(),
+                        doc: serde_json::to_value(Stored {
+                            sequence,
+                            item: job,
+                            claimed_epoch: 0,
+                            not_before_ms: None,
+                        })?,
+                        precondition: Precondition::Absent,
+                    });
+                }
+                match docs.atomic_batch(ops).await {
+                    Ok(_) => {
+                        let _ = leases
+                            .release("tinymemory.queue", &lease_key, &holder, epoch)
+                            .await?;
+                        return Ok::<bool, StorageError>(true);
+                    }
+                    Err(error) if error.kind() == ErrorKind::Conflict => continue,
+                    Err(error) => return Err(error),
+                }
             }
-            docs.atomic_batch(ops).await?;
-            let _ = leases
-                .release("tinymemory.queue", &lease_key, &holder, epoch)
-                .await?;
-            Ok::<bool, StorageError>(true)
         });
         result
             .map_err(|err| err.to_string())?

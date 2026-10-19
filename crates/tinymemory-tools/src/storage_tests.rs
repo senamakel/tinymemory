@@ -519,6 +519,121 @@ async fn two_driver_job_queue_consumers_run_a_healthy_job_once() {
 }
 
 #[tokio::test]
+async fn concurrent_settlements_at_history_limit_both_ack_jobs() {
+    let (clock, _) = clock_at(30_000);
+    let backend = backend(clock.clone()).await;
+    let left = DriverQueueStore::new(
+        Arc::clone(&backend),
+        Scope::local(),
+        clock.clone(),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let right = DriverQueueStore::new(
+        Arc::clone(&backend),
+        Scope::local(),
+        clock,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let now = chrono::Utc::now();
+    left.import_legacy(&QueueState {
+        pending: Vec::new(),
+        history: (0..crate::queue::MAX_HISTORY)
+            .map(|n| JobRun {
+                id: format!("old-{n}"),
+                job: "build_beliefs".into(),
+                root: Namespace::ROOT.to_string(),
+                ran_at: now,
+                outcome: "done".into(),
+                reason: None,
+                built: None,
+                stored: 0,
+            })
+            .collect(),
+    })
+    .unwrap();
+    let jobs: Vec<_> = ["history-left", "history-right"]
+        .into_iter()
+        .map(|id| QueuedJob {
+            id: id.into(),
+            root: Namespace::ROOT.to_string(),
+            job: build(id),
+            queued_at: now,
+            attempts: 0,
+            last_error: None,
+        })
+        .collect();
+    for job in jobs.clone() {
+        left.enqueue_item(job).unwrap();
+    }
+    let (left_job, left_claim) = left.claim_next(&Selection::All, now, &[]).unwrap().unwrap();
+    let (right_job, right_claim) = right
+        .claim_next(&Selection::All, now, &[])
+        .unwrap()
+        .unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let left_barrier = Arc::clone(&barrier);
+    let left_run = JobRun {
+        id: left_job.id.clone(),
+        job: "build_beliefs".into(),
+        root: left_job.root.clone(),
+        ran_at: now,
+        outcome: "done".into(),
+        reason: None,
+        built: None,
+        stored: 0,
+    };
+    let right_run = JobRun {
+        id: right_job.id.clone(),
+        job: "build_beliefs".into(),
+        root: right_job.root.clone(),
+        ran_at: now,
+        outcome: "done".into(),
+        reason: None,
+        built: None,
+        stored: 0,
+    };
+    let left_thread = std::thread::spawn(move || {
+        left.settle_claim_after_history_snapshot(
+            &left_claim,
+            None,
+            left_run,
+            Vec::new(),
+            Some(Box::new(move || {
+                left_barrier.wait();
+            })),
+        )
+    });
+    let right_thread = std::thread::spawn(move || {
+        right.settle_claim_after_history_snapshot(
+            &right_claim,
+            None,
+            right_run,
+            Vec::new(),
+            Some(Box::new(move || {
+                barrier.wait();
+            })),
+        )
+    });
+    assert!(left_thread.join().unwrap().unwrap());
+    assert!(right_thread.join().unwrap().unwrap());
+
+    let state = DriverQueueStore::new(
+        backend,
+        Scope::local(),
+        Arc::new(|| 30_000),
+        Duration::from_secs(30),
+    )
+    .unwrap()
+    .load();
+    assert!(state.pending.is_empty());
+    assert_eq!(state.history.len(), crate::queue::MAX_HISTORY);
+    assert!(state.history.iter().any(|run| run.id == "history-left"));
+    assert!(state.history.iter().any(|run| run.id == "history-right"));
+}
+
+#[tokio::test]
 async fn driver_queue_import_is_idempotent_and_preserves_newer_target_jobs() {
     let (clock, _) = clock_at(25_000);
     let backend = backend(clock.clone()).await;

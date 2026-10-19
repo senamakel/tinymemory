@@ -148,15 +148,3 @@ async fn history_keeps_the_newest_runs_only() {
     }
     assert_eq!(queue.snapshot().await.history.len(), MAX_HISTORY);
 }
-
-struct SharedQueueStore<S: QueueStore>(Arc<S>);
-
-impl<S: QueueStore> QueueStore for SharedQueueStore<S> {
-    fn load(&self) -> QueueState {
-        self.0.load()
-    }
-
-    fn save(&self, state: &QueueState) -> Result<(), String> {
-        self.0.save(state)
-    }
-}
