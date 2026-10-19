@@ -92,6 +92,21 @@ fn deletion_store(
     .expect("store opened")
 }
 
+fn pending_store(
+    backend: Arc<dyn StorageBackend>,
+    clock: Clock,
+) -> DriverListStore<crate::pending::Entry> {
+    DriverListStore::new(
+        backend,
+        Scope::local(),
+        TOOL_WRITES,
+        clock,
+        Duration::from_secs(30),
+        |entry| entry.ticket.clone(),
+    )
+    .expect("store opened")
+}
+
 #[tokio::test]
 async fn claim_rereads_eligibility_after_candidate_scan() {
     let (clock, _) = clock_at(1_000);
@@ -401,11 +416,11 @@ async fn two_driver_pending_write_consumers_execute_a_healthy_item_once() {
     let (clock, _) = clock_at(30_000);
     let backend = backend(clock.clone()).await;
     let left = PendingWrites::new(
-        list_store(Arc::clone(&backend), Scope::local(), clock.clone()),
+        pending_store(Arc::clone(&backend), clock.clone()),
         Limits::default(),
     );
     let right = PendingWrites::new(
-        list_store(Arc::clone(&backend), Scope::local(), clock),
+        pending_store(backend, clock),
         Limits::default(),
     );
     let gate = WriteGate::new("shared");

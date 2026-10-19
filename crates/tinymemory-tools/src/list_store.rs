@@ -31,10 +31,13 @@ pub struct ItemClaim<T> {
 /// Where the host keeps one queue's entries (a file, a document, a stream),
 /// in order, oldest first.
 ///
-/// Synchronous: the queues are small and read-modify-written under their own
-/// lock. `load` returns an empty list when nothing is saved; an unreadable
-/// store is `Err` so a queue never overwrites entries it could not read. A
-/// host that sets a corrupt file aside returns empty after doing so.
+/// Synchronous host port for queue snapshots and per-item mutations. Local
+/// file and memory providers may implement the default read-modify-write
+/// methods; multi-consumer providers override append, claim, settlement, and
+/// removal with atomic item operations. `load` returns an empty list when
+/// nothing is saved; an unreadable store is `Err` so a queue never overwrites
+/// entries it could not read. A host that sets a corrupt file aside returns
+/// empty after doing so.
 pub trait ListStore<T>: Send + Sync {
     /// The saved entries.
     ///
