@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tinymemory_api::conformance::ReferenceEngine;
 use tinymemory_api::{LearningKind, MemoryMeta, Namespace, StoreItem};
 use tinystoragedrivers_core::schema::Registry;
-use tinystoragedrivers_core::{MemoryStorage, Scope, StorageBackend};
+use tinystoragedrivers_core::{Blocking, MemoryStorage, Precondition, Scope, StorageBackend};
 
 use crate::list_store::ListStore;
 use crate::pending::{Binding, Limits, PendingWrites, WriteExecutor, WriteGate, WriteOperation};
@@ -47,6 +47,111 @@ fn list_store(
         |item| item.id.clone(),
     )
     .expect("store opened")
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ReadinessItem {
+    id: String,
+    ready: bool,
+}
+
+fn readiness_store(
+    backend: Arc<dyn StorageBackend>,
+    clock: Clock,
+) -> DriverListStore<ReadinessItem> {
+    DriverListStore::new(
+        backend,
+        Scope::local(),
+        TOOL_WRITES,
+        clock,
+        Duration::from_millis(10),
+        |item| item.id.clone(),
+    )
+    .expect("store opened")
+}
+
+#[tokio::test]
+async fn claim_rereads_eligibility_after_candidate_scan() {
+    let (clock, _) = clock_at(1_000);
+    let backend = backend(clock.clone()).await;
+    let first = readiness_store(Arc::clone(&backend), clock.clone());
+    let second = readiness_store(Arc::clone(&backend), clock);
+    first
+        .append(
+            "same-row",
+            ReadinessItem {
+                id: "same-row".into(),
+                ready: true,
+            },
+        )
+        .unwrap();
+
+    let update_backend = Arc::clone(&backend);
+    let update_blocking = Blocking::new().unwrap();
+    let hook = Arc::new(move |id: &str, point: super::list::ClaimPoint| {
+        if id != "same-row" || !matches!(point, super::list::ClaimPoint::CandidateRead) {
+            return;
+        }
+        let backend = Arc::clone(&update_backend);
+        update_blocking
+            .run(async move {
+                let docs = backend.for_scope(&Scope::local())?.documents().clone();
+                let current = docs
+                    .get_as::<super::Stored<ReadinessItem>>(TOOL_WRITES, "same-row")
+                    .await?
+                    .expect("candidate still exists");
+                let version = current.version;
+                let mut changed = current.doc;
+                changed.item.ready = false;
+                docs.put_as(
+                    TOOL_WRITES,
+                    "same-row",
+                    &changed,
+                    Precondition::Version(version),
+                )
+                .await?;
+                Ok::<_, tinystoragedrivers_core::StorageError>(())
+            })
+            .unwrap()
+            .unwrap();
+    });
+
+    let claimed = first
+        .claim_item_with_hook(Vec::new(), i64::MAX, |item| item.ready, hook)
+        .unwrap();
+    assert!(claimed.is_none(), "settled row is not claimed from stale snapshot");
+    assert!(!second.load().unwrap()[0].ready);
+}
+
+#[tokio::test]
+async fn claim_write_is_fenced_if_lease_epoch_changes_after_acquisition() {
+    let (clock, now) = clock_at(2_000);
+    let backend = backend(clock.clone()).await;
+    let first = list_store(Arc::clone(&backend), Scope::local(), clock.clone());
+    let second = list_store(Arc::clone(&backend), Scope::local(), clock);
+    first
+        .append(
+            "one",
+            Item {
+                id: "one".into(),
+                value: "pending".into(),
+            },
+        )
+        .unwrap();
+
+    let takeover = Arc::new(move |id: &str, point: super::list::ClaimPoint| {
+        if id == "one" && matches!(point, super::list::ClaimPoint::LeaseAcquired) {
+            now.store(2_011, Ordering::SeqCst);
+            assert!(second
+                .claim_oldest(&[], i64::MAX, &|item| item.id.clone())
+                .unwrap()
+                .is_some());
+        }
+    });
+    let stale_claim = first
+        .claim_item_with_hook(Vec::new(), i64::MAX, |_| true, takeover)
+        .unwrap();
+    assert!(stale_claim.is_none(), "expired lease owner cannot claim the row");
 }
 
 #[tokio::test]
@@ -164,6 +269,41 @@ async fn driver_list_preserves_fifo_scope_and_idempotent_target_wins_import() {
     assert_eq!(store.load().unwrap()[1].id, "occurrence-2");
     assert_eq!(store.load().unwrap()[2].value, "new target value");
     assert!(other.load().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_import_handles_reread_absent_insert_conflicts() {
+    let (clock, _) = clock_at(15_000);
+    let backend = backend(clock.clone()).await;
+    let first = list_store(Arc::clone(&backend), Scope::local(), clock.clone());
+    let second = list_store(backend, Scope::local(), clock);
+    let entries = || {
+        vec![(
+            "stable-legacy-occurrence".to_owned(),
+            Item {
+                id: "stable-legacy-occurrence".into(),
+                value: "legacy".into(),
+            },
+        )]
+    };
+    let after_absent = Arc::new(std::sync::Barrier::new(2));
+    let left_barrier = Arc::clone(&after_absent);
+    let left = std::thread::spawn(move || {
+        first
+            .import_items_with_hook(entries(), Arc::new(move |_| left_barrier.wait()))
+            .unwrap()
+    });
+    let right_barrier = Arc::clone(&after_absent);
+    let right = std::thread::spawn(move || {
+        second
+            .import_items_with_hook(entries(), Arc::new(move |_| right_barrier.wait()))
+            .unwrap()
+    });
+    let left = left.join().unwrap();
+    let right = right.join().unwrap();
+    assert_eq!(left.imported + right.imported, 1);
+    assert_eq!(left.identical + right.identical, 1);
+    assert_eq!(left.conflicts + right.conflicts, 0);
 }
 
 fn build(agent: &str) -> crate::background::BackgroundJob {

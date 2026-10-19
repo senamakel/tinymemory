@@ -179,6 +179,14 @@ where
         &self,
         entries: impl IntoIterator<Item = (String, T)>,
     ) -> Result<ImportReport, StoreError> {
+        self.import_items_with_hook(entries, Arc::new(|_| {}))
+    }
+
+    pub(super) fn import_items_with_hook(
+        &self,
+        entries: impl IntoIterator<Item = (String, T)>,
+        after_absent: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> Result<ImportReport, StoreError> {
         let entries: Vec<_> = entries.into_iter().collect();
         let len = i64::try_from(entries.len())
             .map_err(|_| StoreError("legacy queue is too large".into()))?;
@@ -201,23 +209,42 @@ where
                             }
                         }
                         None => {
+                            after_absent(&id);
                             let sequence = i64::try_from(index).map_err(|_| {
                                 StorageError::invalid_input("legacy order out of range")
                             })? - len;
-                            documents
+                            let value = Stored {
+                                sequence,
+                                item,
+                                claimed_epoch: 0,
+                                not_before_ms: None,
+                            };
+                            match documents
                                 .put_as(
                                     collection,
                                     &id,
-                                    &Stored {
-                                        sequence,
-                                        item,
-                                        claimed_epoch: 0,
-                                        not_before_ms: None,
-                                    },
+                                    &value,
                                     Precondition::Absent,
                                 )
-                                .await?;
-                            report.imported += 1;
+                                .await
+                            {
+                                Ok(_) => report.imported += 1,
+                                Err(error) if error.kind() == ErrorKind::Conflict => {
+                                    let Some(found) =
+                                        documents.get_as::<Stored<T>>(collection, &id).await?
+                                    else {
+                                        return Err(error);
+                                    };
+                                    if serde_json::to_value(found.doc.item)?
+                                        == serde_json::to_value(value.item)?
+                                    {
+                                        report.identical += 1;
+                                    } else {
+                                        report.conflicts += 1;
+                                    }
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                     }
                 }
@@ -236,7 +263,7 @@ where
         self.claim_item_with_hook(excluded, eligible_at_ms, eligible, Arc::new(|_, _| {}))
     }
 
-    fn claim_item_with_hook(
+    pub(super) fn claim_item_with_hook(
         &self,
         excluded: Vec<String>,
         eligible_at_ms: i64,
@@ -427,7 +454,7 @@ where
 }
 
 #[derive(Clone, Copy)]
-enum ClaimPoint {
+pub(super) enum ClaimPoint {
     CandidateRead,
     LeaseAcquired,
 }

@@ -6,8 +6,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tinystoragedrivers_core::{
-    Clock, Counters, DocumentStoreExt, Leases, Precondition, Query, Scope, Sort, StorageBackend,
-    StorageError, Version, WriteOp, WriteOptions,
+    Clock, Counters, DocumentStoreExt, ErrorKind, Leases, Precondition, Query, Scope, Sort,
+    StorageBackend, StorageError, Version, WriteOp, WriteOptions,
 };
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
@@ -101,7 +101,7 @@ impl DriverQueueStore {
                                 .await
                             {
                                 Ok(_) => report.imported += 1,
-                                Err(error) => {
+                                Err(error) if error.kind() == ErrorKind::Conflict => {
                                     let Some(found) =
                                         docs.get_as::<StoredRun>(JOB_RUNS, &id).await?
                                     else {
@@ -113,6 +113,7 @@ impl DriverQueueStore {
                                         report.conflicts += 1;
                                     }
                                 }
+                                Err(error) => return Err(error),
                             }
                         }
                     }
