@@ -37,7 +37,7 @@ sha2 = "0.11"
 [dev-dependencies]
 # Every tool and the context compiler run against the reference engine.
 tinymemory-api = { path = "../tinymemory-api", features = ["conformance"] }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true
