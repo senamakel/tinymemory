@@ -1,6 +1,7 @@
 //! Driver-backed generic FIFO list adapter.
 
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -248,7 +249,12 @@ where
         eligible_at_ms: i64,
         eligible: impl Fn(&T) -> bool + Send + Sync + 'static,
     ) -> Result<Option<ItemClaim<T>>, StoreError> {
-        self.claim_item_with_hook(excluded, eligible_at_ms, eligible, Arc::new(|_, _| {}))
+        self.claim_item_with_hook(
+            excluded,
+            eligible_at_ms,
+            eligible,
+            Arc::new(|_, _| Box::pin(async { Ok(()) })),
+        )
     }
 
     pub(super) fn claim_item_with_hook(
@@ -256,7 +262,14 @@ where
         excluded: Vec<String>,
         eligible_at_ms: i64,
         eligible: impl Fn(&T) -> bool + Send + Sync + 'static,
-        hook: Arc<dyn Fn(&str, ClaimPoint) + Send + Sync>,
+        hook: Arc<
+            dyn Fn(
+                    &str,
+                    ClaimPoint,
+                ) -> Pin<Box<dyn std::future::Future<Output = Result<(), StorageError>> + Send>>
+                + Send
+                + Sync,
+        >,
     ) -> Result<Option<ItemClaim<T>>, StoreError> {
         let documents = self.storage()?.documents().clone();
         let leases = Leases::new(&documents).with_clock(self.clock.clone());
@@ -280,7 +293,7 @@ where
                 {
                     continue;
                 }
-                hook(&candidate.id, ClaimPoint::CandidateRead);
+                hook(&candidate.id, ClaimPoint::CandidateRead).await?;
                 let lease_key = format!("{collection}:{}", candidate.id);
                 let Some(lease) = leases
                     .acquire("tinymemory.queue", &lease_key, &holder, lease_ms)
@@ -288,7 +301,7 @@ where
                 else {
                     continue;
                 };
-                hook(&candidate.id, ClaimPoint::LeaseAcquired);
+                hook(&candidate.id, ClaimPoint::LeaseAcquired).await?;
                 // The candidate query is only a hint. Another consumer may
                 // have acknowledged, removed, or retried this item before we
                 // acquired its lease, so eligibility and the observed state
