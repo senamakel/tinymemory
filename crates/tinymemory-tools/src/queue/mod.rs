@@ -38,8 +38,8 @@ pub use types::{
 /// A persisted, de-duplicating queue of [`BackgroundJob`]s.
 pub struct JobQueue<S: QueueStore> {
     store: S,
-    /// Serialises read-modify-writes. Held across a run, so two runs never
-    /// take the same job.
+    /// Serialises operations through this handle. Independent durable handles
+    /// coordinate claims through their storage provider.
     lock: Mutex<()>,
 }
 
