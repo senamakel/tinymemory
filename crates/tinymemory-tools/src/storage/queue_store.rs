@@ -13,7 +13,9 @@ use tinystoragedrivers_core::{
 use crate::list_store::{ItemClaim, ListStore, StoreError};
 use crate::queue::{JobRun, QueueState, QueueStore, QueuedJob, Selection};
 
-use super::{DriverListStore, ImportReport, JOB_RUNS, JOBS, Stored, error, system_clock};
+use super::{
+    DriverListStore, ImportReport, JOB_RUNS, JOBS, QueueImportReport, Stored, error, system_clock,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredRun {
