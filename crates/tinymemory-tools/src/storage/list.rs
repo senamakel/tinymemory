@@ -8,8 +8,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tinystoragedrivers_core::{
-    Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases, Precondition,
-    Query, Scope, Sort, StorageBackend, StorageError,
+    Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, ErrorKind, Filter, Leases,
+    Precondition, Query, Scope, Sort, StorageBackend, StorageError,
 };
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
@@ -233,6 +233,16 @@ where
         eligible_at_ms: i64,
         eligible: impl Fn(&T) -> bool + Send + Sync + 'static,
     ) -> Result<Option<ItemClaim<T>>, StoreError> {
+        self.claim_item_with_hook(excluded, eligible_at_ms, eligible, Arc::new(|_, _| {}))
+    }
+
+    fn claim_item_with_hook(
+        &self,
+        excluded: Vec<String>,
+        eligible_at_ms: i64,
+        eligible: impl Fn(&T) -> bool + Send + Sync + 'static,
+        hook: Arc<dyn Fn(&str, ClaimPoint) + Send + Sync>,
+    ) -> Result<Option<ItemClaim<T>>, StoreError> {
         let documents = self.storage()?.documents().clone();
         let leases = Leases::new(&documents).with_clock(self.clock.clone());
         let backend = Arc::clone(&self.backend);
@@ -253,6 +263,7 @@ where
                 {
                     continue;
                 }
+                hook(&candidate.id, ClaimPoint::CandidateRead);
                 let lease_key = format!("{collection}:{}", candidate.id);
                 let Some(lease) = leases
                     .acquire("tinymemory.queue", &lease_key, &holder, lease_ms)
@@ -260,19 +271,60 @@ where
                 else {
                     continue;
                 };
+                hook(&candidate.id, ClaimPoint::LeaseAcquired);
+                // The candidate query is only a hint. Another consumer may
+                // have acknowledged, removed, or retried this item before we
+                // acquired its lease, so eligibility and the observed state
+                // must be refreshed under ownership.
+                let fenced = match backend.for_scope_fenced(&scope, &lease.fence(&scope)) {
+                    Ok(fenced) => fenced,
+                    Err(error) if error.kind() == ErrorKind::Fenced => continue,
+                    Err(error) => return Err(error),
+                };
+                let documents = fenced.documents();
+                let Some(current) = documents
+                    .get_as::<Stored<T>>(collection, &candidate.id)
+                    .await?
+                else {
+                    let _ = leases
+                        .release("tinymemory.queue", &lease_key, &holder, lease.epoch)
+                        .await?;
+                    continue;
+                };
+                if excluded.iter().any(|id| id == &current.id)
+                    || current
+                        .doc
+                        .not_before_ms
+                        .is_some_and(|deadline| deadline > eligible_at_ms)
+                    || !eligible(&current.doc.item)
+                {
+                    let _ = leases
+                        .release("tinymemory.queue", &lease_key, &holder, lease.epoch)
+                        .await?;
+                    continue;
+                }
                 let patch = json!({"claimed_epoch": lease.epoch});
-                let due = Filter::exists("not_before_ms", false)
-                    .or(Filter::lte("not_before_ms", eligible_at_ms));
-                let claimed = documents
+                let not_before_filter = match current.doc.not_before_ms {
+                    Some(deadline) => Filter::eq("not_before_ms", deadline),
+                    None => Filter::exists("not_before_ms", false),
+                };
+                let item = serde_json::to_value(&current.doc.item)?;
+                let claimed = match documents
                     .claim(
                         collection,
-                        &Filter::eq("_id", candidate.id.clone())
-                            .and(Filter::eq("sequence", candidate.doc.sequence))
-                            .and(due),
+                        &Filter::eq("_id", current.id.clone())
+                            .and(Filter::eq("sequence", current.doc.sequence))
+                            .and(Filter::eq("item", item))
+                            .and(not_before_filter),
                         &[],
                         &patch,
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(claimed) => claimed,
+                    Err(error) if error.kind() == ErrorKind::Fenced => return Ok(None),
+                    Err(error) => return Err(error),
+                };
                 let Some(claimed) = claimed else {
                     let _ = leases
                         .release("tinymemory.queue", &lease_key, &holder, lease.epoch)
@@ -372,6 +424,12 @@ where
         .map_err(error)?
         .map_err(error)
     }
+}
+
+#[derive(Clone, Copy)]
+enum ClaimPoint {
+    CandidateRead,
+    LeaseAcquired,
 }
 
 impl<T> ListStore<T> for DriverListStore<T>
