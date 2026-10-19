@@ -206,6 +206,108 @@ async fn settled_writes_are_reported() {
     assert_eq!(*seen.lock().unwrap(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_pending_write_queues_do_not_execute_the_same_head() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RacingStore {
+        entries: StdMutex<Vec<Entry>>,
+        readers: Barrier,
+        initial_reads: AtomicUsize,
+    }
+
+    impl ListStore<Entry> for RacingStore {
+        fn load(&self) -> Result<Vec<Entry>, StoreError> {
+            let entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if self.initial_reads.fetch_add(1, Ordering::SeqCst) < 2 {
+                self.readers.wait();
+            }
+            Ok(entries)
+        }
+
+        fn save(&self, entries: &[Entry]) -> Result<(), StoreError> {
+            *self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = entries.to_vec();
+            Ok(())
+        }
+    }
+
+    struct SharedListStore(Arc<RacingStore>);
+
+    impl ListStore<Entry> for SharedListStore {
+        fn load(&self) -> Result<Vec<Entry>, StoreError> {
+            self.0.load()
+        }
+
+        fn save(&self, entries: &[Entry]) -> Result<(), StoreError> {
+            self.0.save(entries)
+        }
+    }
+
+    struct Counter(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl WriteExecutor for Counter {
+        async fn run(&self, _: &WriteOperation) -> Result<(), String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(RacingStore {
+        entries: StdMutex::new(vec![Entry {
+            ticket: "ticket-1".into(),
+            binding: binding(),
+            scope_root: Namespace::ROOT,
+            epoch: None,
+            operation: learn("once"),
+            status: None,
+        }]),
+        readers: Barrier::new(2),
+        initial_reads: AtomicUsize::new(0),
+    });
+    let left = PendingWrites::new(SharedListStore(Arc::clone(&store)), Limits::default());
+    let right = PendingWrites::new(SharedListStore(store), Limits::default());
+    let left_gate = WriteGate::new("left");
+    let right_gate = WriteGate::new("right");
+    let executions = Arc::new(AtomicUsize::new(0));
+    let left_executor = Counter(Arc::clone(&executions));
+    let right_executor = Counter(Arc::clone(&executions));
+
+    let left = tokio::spawn(async move {
+        left.drain(
+            &left_executor,
+            &left_gate,
+            left_gate.generation(),
+            |_| true,
+            |_| {},
+        )
+        .await
+    });
+    let right = tokio::spawn(async move {
+        right
+            .drain(
+                &right_executor,
+                &right_gate,
+                right_gate.generation(),
+                |_| true,
+                |_| {},
+            )
+            .await
+    });
+
+    let (left, right) = tokio::join!(left, right);
+    assert_eq!(left.unwrap() + right.unwrap(), 1);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn an_unreadable_store_is_unavailable_not_overwritten() {
     struct Broken;

@@ -148,3 +148,62 @@ async fn history_keeps_the_newest_runs_only() {
     }
     assert_eq!(queue.snapshot().await.history.len(), MAX_HISTORY);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_queue_instances_do_not_run_the_same_claimed_job() {
+    use std::sync::{Barrier, Mutex};
+
+    struct RacingStore {
+        state: Mutex<QueueState>,
+        readers: Barrier,
+    }
+
+    impl QueueStore for RacingStore {
+        fn load(&self) -> QueueState {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            self.readers.wait();
+            state
+        }
+
+        fn save(&self, state: &QueueState) -> Result<(), String> {
+            *self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = state.clone();
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(RacingStore {
+        state: Mutex::new(QueueState {
+            pending: vec![queued("local", build("a"))],
+            history: Vec::new(),
+        }),
+        readers: Barrier::new(2),
+    });
+    let left = JobQueue::new(SharedQueueStore(Arc::clone(&store)));
+    let right = JobQueue::new(SharedQueueStore(store));
+
+    let left = tokio::spawn(async move { left.run(reference(), Selection::All, 0).await });
+    let right = tokio::spawn(async move { right.run(reference(), Selection::All, 0).await });
+    let (left, right) = tokio::join!(left, right);
+    let run_count = left.unwrap().unwrap().len() + right.unwrap().unwrap().len();
+
+    assert_eq!(run_count, 1, "one job must be claimed by only one consumer");
+}
+
+struct SharedQueueStore<S: QueueStore>(Arc<S>);
+
+impl<S: QueueStore> QueueStore for SharedQueueStore<S> {
+    fn load(&self) -> QueueState {
+        self.0.load()
+    }
+
+    fn save(&self, state: &QueueState) -> Result<(), String> {
+        self.0.save(state)
+    }
+}
