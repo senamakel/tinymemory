@@ -176,7 +176,7 @@ impl DriverQueueStore {
                 .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl_ms)
                 .await?
             else {
-                return Ok(false);
+                return Ok::<bool, StorageError>(false);
             };
             let fenced = backend.for_scope_fenced(&scope, &lease.fence(&scope))?;
             let docs = fenced.documents();
@@ -185,7 +185,7 @@ impl DriverQueueStore {
                 .await?
                 .ok_or_else(|| StorageError::conflict("claimed job disappeared"))?;
             if current.version != job_version {
-                return Ok(false);
+                return Ok::<bool, StorageError>(false);
             }
             let sequence =
                 i64::try_from(Counters::new(docs).next("tinymemory", JOB_RUNS).await?)
@@ -256,7 +256,7 @@ impl DriverQueueStore {
             let _ = leases
                 .release("tinymemory.queue", &lease_key, &holder, epoch)
                 .await?;
-            Ok(true)
+            Ok::<bool, StorageError>(true)
         });
         result
             .map_err(|err| err.to_string())?
