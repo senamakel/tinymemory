@@ -8,26 +8,22 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tinystoragedrivers_core::{
-    Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases,
-    Precondition, Query, Scope, Sort, StorageBackend, StorageError, Version,
+    Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases, Precondition,
+    Query, Scope, Sort, StorageBackend, StorageError, Version,
 };
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
 
 use super::{error, holder_id, system_clock};
 
-pub(super) fn error(error: impl std::fmt::Display) -> StoreError {
-    StoreError(error.to_string())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Stored<T> {
-    sequence: i64,
-    item: T,
+    pub(super) sequence: i64,
+    pub(super) item: T,
     #[serde(default)]
-    claimed_epoch: u64,
+    pub(super) claimed_epoch: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    not_before_ms: Option<i64>,
+    pub(super) not_before_ms: Option<i64>,
 }
 
 /// A list-shaped queue backed by one TSD document per item.
@@ -39,13 +35,13 @@ pub(super) struct Stored<T> {
 /// effects are at-least-once across crashes and a long operation may overlap
 /// its retry after its visibility lease expires.
 pub struct DriverListStore<T> {
-    backend: Arc<dyn StorageBackend>,
-    scope: Scope,
-    blocking: Blocking,
-    clock: Clock,
+    pub(super) backend: Arc<dyn StorageBackend>,
+    pub(super) scope: Scope,
+    pub(super) blocking: Blocking,
+    pub(super) clock: Clock,
     holder: String,
     collection: &'static str,
-    lease_ms: i64,
+    pub(super) lease_ms: i64,
     id_of: Arc<dyn Fn(&T) -> String + Send + Sync>,
     _item: PhantomData<fn() -> T>,
 }
@@ -111,11 +107,11 @@ where
         )
     }
 
-    fn storage(&self) -> Result<tinystoragedrivers_core::ScopedStorage, StoreError> {
+    pub(super) fn storage(&self) -> Result<tinystoragedrivers_core::ScopedStorage, StoreError> {
         self.backend.for_scope(&self.scope).map_err(error)
     }
 
-    fn run<R: Send + 'static>(
+    pub(super) fn run<R: Send + 'static>(
         &self,
         future: impl std::future::Future<Output = R> + Send + 'static,
     ) -> Result<R, StoreError> {

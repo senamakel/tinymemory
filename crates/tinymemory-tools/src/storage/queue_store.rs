@@ -4,17 +4,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tinystoragedrivers_core::{
-    Clock, Counters, DocumentStoreExt, Leases, Precondition, Query, Scope, Sort,
-    StorageBackend, StorageError, Version, WriteOp, WriteOptions,
-};
 use sha2::{Digest, Sha256};
+use tinystoragedrivers_core::{
+    Clock, Counters, DocumentStoreExt, Leases, Precondition, Query, Scope, Sort, StorageBackend,
+    StorageError, Version, WriteOp, WriteOptions,
+};
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
 use crate::queue::{JobRun, QueueState, QueueStore, QueuedJob, Selection};
 
-use super::{DriverListStore, Stored, JOB_RUNS, JOBS, error, system_clock};
+use super::{DriverListStore, ImportReport, JOB_RUNS, JOBS, Stored, error, system_clock};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredRun {
+    sequence: i64,
+    run: JobRun,
+}
 
 /// A background job queue backed by one document per job and run.
 pub struct DriverQueueStore {
@@ -87,9 +92,9 @@ impl DriverQueueStore {
                             }
                         }
                         None => {
-                            let sequence = -i64::try_from(index)
-                                .map_err(|_| StorageError::invalid_input("legacy order out of range"))?
-                                - 1;
+                            let sequence = -i64::try_from(index).map_err(|_| {
+                                StorageError::invalid_input("legacy order out of range")
+                            })? - 1;
                             let value = StoredRun { sequence, run };
                             match docs
                                 .put_as(JOB_RUNS, &id, &value, Precondition::Absent)
@@ -188,7 +193,12 @@ impl DriverQueueStore {
                 options: WriteOptions::default(),
             }];
             let history = docs
-                .query_as::<StoredRun>(JOB_RUNS, &Query::all().sort(Sort::desc("sequence")).limit(crate::queue::MAX_HISTORY))
+                .query_as::<StoredRun>(
+                    JOB_RUNS,
+                    &Query::all()
+                        .sort(Sort::desc("sequence"))
+                        .limit(crate::queue::MAX_HISTORY),
+                )
                 .await?;
             if history.items.len() == crate::queue::MAX_HISTORY {
                 let oldest = history.items.last().ok_or_else(|| {
@@ -325,4 +335,3 @@ impl QueueStore for DriverQueueStore {
         self.settle_claim(claim, replacement, run, follow_ups)
     }
 }
-

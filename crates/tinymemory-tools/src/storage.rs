@@ -6,12 +6,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::list_store::StoreError;
 use tinystoragedrivers_core::{Owner, ScopeClass, StorageError, schema::Schema};
 
 mod list;
 mod queue_store;
 
 pub use list::DriverListStore;
+pub(super) use list::Stored;
 pub use queue_store::{DriverQueueStore, QueueImportReport};
 
 /// Queued background jobs, one document per job.
@@ -44,18 +46,36 @@ pub struct ImportReport {
     pub conflicts: usize,
 }
 
+/// Per-family outcomes from importing a legacy whole-state job snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueueImportReport {
+    /// Pending job outcomes.
+    pub jobs: ImportReport,
+    /// History row outcomes.
+    pub runs: ImportReport,
+}
+
 static HOLDERS: AtomicU64 = AtomicU64::new(1);
 
 fn holder_id() -> String {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
-    format!("{}-{nonce}-{}", std::process::id(), HOLDERS.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "{}-{nonce}-{}",
+        std::process::id(),
+        HOLDERS.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn system_clock() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
+pub(super) fn error(error: impl std::fmt::Display) -> StoreError {
+    StoreError(error.to_string())
+}
