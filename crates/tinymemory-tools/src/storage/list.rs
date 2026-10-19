@@ -404,7 +404,6 @@ where
         let version = Version(claim.version);
         let ttl = self.lease_ms;
         let collection = self.collection;
-        let replacement = replacement.map(|(item, not_before_ms)| (item, not_before_ms));
         self.run(async move {
             let Some(lease) = leases
                 .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl)

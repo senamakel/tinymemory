@@ -276,9 +276,8 @@ impl QueueStore for DriverQueueStore {
     }
 
     fn enqueue_item(&self, job: QueuedJob) -> Result<bool, String> {
-        self.jobs
-            .append(&job.id, job)
-            .map_err(|err| err.to_string())
+        let id = job.id.clone();
+        self.jobs.append(&id, job).map_err(|err| err.to_string())
     }
 
     fn claim_next(
