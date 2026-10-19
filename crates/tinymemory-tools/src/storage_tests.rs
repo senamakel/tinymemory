@@ -255,20 +255,24 @@ async fn driver_retry_nacks_until_its_visibility_deadline() {
         .claim_oldest(&[], 5_000, &|item| item.id.clone())
         .unwrap()
         .unwrap();
-    assert!(store
-        .retry(
-            &claim,
-            Item {
-                id: "retry".into(),
-                value: "after retry".into(),
-            },
-            Some(5_010),
-        )
-        .unwrap());
-    assert!(store
-        .claim_oldest(&[], 5_009, &|item| item.id.clone())
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .retry(
+                &claim,
+                Item {
+                    id: "retry".into(),
+                    value: "after retry".into(),
+                },
+                Some(5_010),
+            )
+            .unwrap()
+    );
+    assert!(
+        store
+            .claim_oldest(&[], 5_009, &|item| item.id.clone())
+            .unwrap()
+            .is_none()
+    );
 
     now.store(5_011, Ordering::SeqCst);
     let retried = store
@@ -404,7 +408,7 @@ fn build(agent: &str) -> crate::background::BackgroundJob {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_driver_job_queue_consumers_run_a_healthy_job_once() {
     let (clock, _) = clock_at(20_000);
     let backend = backend(clock.clone()).await;
@@ -442,13 +446,8 @@ async fn two_driver_job_queue_consumers_run_a_healthy_job_once() {
 async fn driver_queue_import_is_idempotent_and_preserves_newer_target_jobs() {
     let (clock, _) = clock_at(25_000);
     let backend = backend(clock.clone()).await;
-    let store = DriverQueueStore::new(
-        backend,
-        Scope::local(),
-        clock,
-        Duration::from_secs(30),
-    )
-    .unwrap();
+    let store =
+        DriverQueueStore::new(backend, Scope::local(), clock, Duration::from_secs(30)).unwrap();
     let now = chrono::Utc::now();
     let newer = QueuedJob {
         id: "newer-native-job".into(),
@@ -517,28 +516,31 @@ fn learn(text: &str) -> WriteOperation {
     }
 }
 
-struct WriteCounter(AtomicUsize);
+struct PausingWriteCounter {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    calls: AtomicUsize,
+}
 
 #[async_trait::async_trait]
-impl WriteExecutor for WriteCounter {
+impl WriteExecutor for PausingWriteCounter {
     async fn run(&self, _: &WriteOperation) -> Result<(), String> {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        self.release.notified().await;
         Ok(())
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_driver_pending_write_consumers_execute_a_healthy_item_once() {
     let (clock, _) = clock_at(30_000);
     let backend = backend(clock.clone()).await;
-    let left = PendingWrites::new(
+    let left = Arc::new(PendingWrites::new(
         pending_store(Arc::clone(&backend), clock.clone()),
         Limits::default(),
-    );
-    let right = PendingWrites::new(
-        pending_store(backend, clock),
-        Limits::default(),
-    );
+    ));
+    let right = PendingWrites::new(pending_store(backend, clock), Limits::default());
     let gate = WriteGate::new("shared");
     left.enqueue(
         learn("once"),
@@ -547,50 +549,82 @@ async fn two_driver_pending_write_consumers_execute_a_healthy_item_once() {
         &gate,
     )
     .unwrap();
-    let executor = WriteCounter(AtomicUsize::new(0));
-
-    let (left_count, right_count) = tokio::join!(
-        left.drain(&executor, &gate, gate.generation(), |_| true, |_| {}),
-        right.drain(&executor, &gate, gate.generation(), |_| true, |_| {}),
-    );
+    let executor = Arc::new(PausingWriteCounter {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        calls: AtomicUsize::new(0),
+    });
+    let generation = gate.generation();
+    let left_queue = Arc::clone(&left);
+    let left_gate = gate.clone();
+    let left_executor = Arc::clone(&executor);
+    let left_drain = tokio::spawn(async move {
+        left_queue
+            .drain(&*left_executor, &left_gate, generation, |_| true, |_| {})
+            .await
+    });
+    executor.started.notified().await;
+    let right_count = right
+        .drain(&*executor, &gate, generation, |_| true, |_| {})
+        .await;
+    executor.release.notify_one();
+    let left_count = left_drain.await.unwrap();
     assert_eq!(left_count + right_count, 1);
-    assert_eq!(executor.0.load(Ordering::SeqCst), 1);
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     assert!(left.is_empty());
 }
 
-struct DeletionCounter(AtomicUsize);
+struct PausingDeletionCounter {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    calls: AtomicUsize,
+}
 
 #[async_trait::async_trait]
-impl DeletionExecutor for DeletionCounter {
+impl DeletionExecutor for PausingDeletionCounter {
     fn is_reachable(&self) -> bool {
         true
     }
 
     async fn run(&self, _: &PendingDeletion) -> Result<usize, String> {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        self.release.notified().await;
         Ok(1)
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_driver_deletion_consumers_execute_a_healthy_item_once() {
     let (clock, _) = clock_at(40_000);
     let backend = backend(clock.clone()).await;
-    let left = DeletionQueue::new(
+    let left = Arc::new(DeletionQueue::new(
         deletion_store(Arc::clone(&backend), clock.clone()),
         Backoff::default(),
-    );
+    ));
     let right = DeletionQueue::new(deletion_store(backend, clock), Backoff::default());
     left.enqueue(PendingDeletion::Thread {
         thread_id: "thread-one".into(),
     });
-    let executor = DeletionCounter(AtomicUsize::new(0));
-
-    let (left_count, right_count) = tokio::join!(
-        left.drain(&executor, Drain::Force, chrono::Utc::now()),
-        right.drain(&executor, Drain::Force, chrono::Utc::now()),
-    );
+    let executor = Arc::new(PausingDeletionCounter {
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        calls: AtomicUsize::new(0),
+    });
+    let left_queue = Arc::clone(&left);
+    let left_executor = Arc::clone(&executor);
+    let left_drain = tokio::spawn(async move {
+        left_queue
+            .drain(&*left_executor, Drain::Force, chrono::Utc::now())
+            .await
+    });
+    executor.started.notified().await;
+    let right_count = right
+        .drain(&*executor, Drain::Force, chrono::Utc::now())
+        .await;
+    executor.release.notify_one();
+    let left_count = left_drain.await.unwrap();
     assert_eq!(left_count + right_count, 1);
-    assert_eq!(executor.0.load(Ordering::SeqCst), 1);
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     assert!(left.pending().is_empty());
 }
