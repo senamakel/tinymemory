@@ -1,13 +1,16 @@
 use super::*;
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tinymemory_api::conformance::ReferenceEngine;
 use tinymemory_api::{LearningKind, MemoryMeta, Namespace, StoreItem};
 use tinystoragedrivers_core::schema::Registry;
-use tinystoragedrivers_core::{Blocking, MemoryStorage, Precondition, Scope, StorageBackend};
+use tinystoragedrivers_core::{
+    Blocking, Clock, MemoryStorage, Precondition, Scope, StorageBackend,
+};
 
 use crate::deletion::{Backoff, DeletionExecutor, DeletionQueue, Drain, PendingDeletion};
 use crate::list_store::ListStore;
@@ -134,7 +137,7 @@ async fn claim_rereads_eligibility_after_candidate_scan() {
             .run(async move {
                 let docs = backend.for_scope(&Scope::local())?.documents().clone();
                 let current = docs
-                    .get_as::<super::Stored<ReadinessItem>>(TOOL_WRITES, "same-row")
+                    .get_as::<super::list::Stored<ReadinessItem>>(TOOL_WRITES, "same-row")
                     .await?
                     .expect("candidate still exists");
                 let version = current.version;
@@ -613,7 +616,7 @@ async fn two_driver_pending_write_consumers_execute_a_healthy_item_once() {
     });
     let generation = gate.generation();
     let left_queue = Arc::clone(&left);
-    let left_gate = gate.clone();
+    let left_gate = gate;
     let left_executor = Arc::clone(&executor);
     let left_drain = tokio::spawn(async move {
         left_queue
@@ -622,7 +625,13 @@ async fn two_driver_pending_write_consumers_execute_a_healthy_item_once() {
     });
     executor.started.notified().await;
     let right_count = right
-        .drain(&*executor, &gate, generation, |_| true, |_| {})
+        .drain(
+            &*executor,
+            &WriteGate::new("shared"),
+            generation,
+            |_| true,
+            |_| {},
+        )
         .await;
     executor.release.notify_one();
     let left_count = left_drain.await.unwrap();

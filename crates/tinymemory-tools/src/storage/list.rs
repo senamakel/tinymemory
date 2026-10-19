@@ -116,15 +116,6 @@ where
         self.blocking.run(future).map_err(error)
     }
 
-    fn lease_key(&self, id: &str) -> String {
-        format!("{}:{id}", self.collection)
-    }
-
-    fn leases(&self) -> Result<Leases, StoreError> {
-        let documents = self.storage()?.documents().clone();
-        Ok(Leases::new(&documents).with_clock(self.clock.clone()))
-    }
-
     async fn all_documents(
         documents: Arc<dyn DocumentStore>,
         collection: &'static str,
