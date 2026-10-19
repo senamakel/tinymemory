@@ -13,6 +13,7 @@
 //! The crate links no executor and does no I/O: the host supplies the store
 //! and the [`DeletionExecutor`] that does the forget.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;

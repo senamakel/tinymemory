@@ -17,7 +17,6 @@ mod queue_store;
 mod tests;
 
 pub use list::DriverListStore;
-pub(super) use list::Stored;
 pub use queue_store::DriverQueueStore;
 
 /// Queued background jobs, one document per job.
