@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tinystoragedrivers_core::{
     Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases, Precondition,
-    Query, Scope, Sort, StorageBackend, StorageError, Version,
+    Query, Scope, Sort, StorageBackend, StorageError,
 };
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
@@ -476,7 +476,7 @@ where
 
     fn remove_matching(&self, predicate: &dyn Fn(&T) -> bool) -> Result<usize, StoreError> {
         let items = self
-            .load()
+            .load()?
             .into_iter()
             .filter(|item| predicate(item))
             .map(|item| (self.id_of)(&item))
@@ -504,9 +504,3 @@ where
     }
 }
 
-/// Convert a driver's version to its public numeric form when recording a
-/// caller-supplied import outcome.
-#[must_use]
-pub const fn document_version(version: Version) -> u64 {
-    version.0
-}
