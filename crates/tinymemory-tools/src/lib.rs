@@ -78,6 +78,8 @@ pub mod pending;
 pub mod prefetch;
 pub mod queue;
 pub mod recall;
+#[cfg(feature = "storage")]
+pub mod storage;
 pub mod tools;
 
 pub use background::{BackgroundJob, BackgroundRunner, JobOutcome, JobReport};
