@@ -140,8 +140,9 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
             return Err(PendingError::Unavailable);
         }
         let entry = entries.last().cloned().ok_or(PendingError::Unavailable)?;
+        let ticket = entry.ticket.clone();
         self.store
-            .append(&entry.ticket, entry)
+            .append(&ticket, entry)
             .map_err(|StoreError(_)| PendingError::Unavailable)?;
         Ok(ack)
     }

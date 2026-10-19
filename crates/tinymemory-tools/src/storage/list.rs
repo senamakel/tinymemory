@@ -147,7 +147,7 @@ where
         let owner = self.collection.to_owned();
         self.run(async move {
             if documents.get(collection, &id).await?.is_some() {
-                return Ok(false);
+                return Ok::<bool, StorageError>(false);
             }
             let sequence = i64::try_from(counters.next("tinymemory", &owner).await?)
                 .map_err(|_| StorageError::invalid_input("queue sequence out of range"))?;
@@ -164,7 +164,7 @@ where
                     Precondition::Absent,
                 )
                 .await?;
-            Ok(true)
+            Ok::<bool, StorageError>(true)
         })
         .map_err(error)?
         .map_err(error)
@@ -409,7 +409,7 @@ where
                 .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl)
                 .await?
             else {
-                return Ok(false);
+                return Ok::<bool, StorageError>(false);
             };
             let fenced = backend.for_scope_fenced(&scope, &lease.fence(&scope))?;
             let documents = fenced.documents();
@@ -417,10 +417,10 @@ where
                 Some((item, not_before_ms)) => {
                     let Some(mut current) = documents.get_as::<Stored<T>>(collection, &id).await?
                     else {
-                        return Ok(false);
+                        return Ok::<bool, StorageError>(false);
                     };
                     if current.version != version {
-                        return Ok(false);
+                        return Ok::<bool, StorageError>(false);
                     }
                     current.doc.item = item;
                     current.doc.not_before_ms = not_before_ms;
@@ -444,7 +444,7 @@ where
             let _ = leases
                 .release("tinymemory.queue", &lease_key, &holder, epoch)
                 .await?;
-            Ok(result)
+            Ok::<bool, StorageError>(result)
         })
         .map_err(error)?
         .map_err(error)
@@ -465,11 +465,13 @@ where
         let documents = self.storage()?.documents().clone();
         let collection = self.collection;
         self.run(async move {
-            Ok(Self::all_documents(documents, collection)
-                .await?
-                .into_iter()
-                .map(|row| row.doc.item)
-                .collect())
+            Ok::<Vec<T>, StorageError>(
+                Self::all_documents(documents, collection)
+                    .await?
+                    .into_iter()
+                    .map(|row| row.doc.item)
+                    .collect(),
+            )
         })
         .map_err(error)?
         .map_err(error)

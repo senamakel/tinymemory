@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tinystoragedrivers_core::{
     Clock, Counters, DocumentStoreExt, ErrorKind, Leases, Precondition, Query, Scope, Sort,
-    StorageBackend, StorageError, Version, WriteOp, WriteOptions,
+    StorageBackend, StorageError, Version, WriteOp,
 };
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
@@ -44,7 +44,9 @@ impl DriverQueueStore {
         lease: Duration,
     ) -> Result<Self, StoreError> {
         Ok(Self {
-            jobs: DriverListStore::new(backend, scope, JOBS, clock, lease, |job| job.id.clone())?,
+            jobs: DriverListStore::<QueuedJob>::new(backend, scope, JOBS, clock, lease, |job| {
+                job.id.clone()
+            })?,
         })
     }
 
@@ -74,7 +76,7 @@ impl DriverQueueStore {
         let history = state.history.clone();
         let storage = self.jobs.storage()?;
         let blocking = self.jobs.blocking.clone();
-        blocking
+        let runs = blocking
             .run(async move {
                 let docs = storage.documents().clone();
                 let mut report = ImportReport::default();
@@ -123,9 +125,9 @@ impl DriverQueueStore {
                 }
                 Ok::<_, StorageError>(report)
             })
-            .map(|runs| QueueImportReport { jobs, runs })
             .map_err(error)?
-            .map_err(error)
+            .map_err(error)?;
+        Ok(QueueImportReport { jobs, runs })
     }
 
     fn load_runs(&self) -> Result<Vec<JobRun>, StoreError> {
@@ -194,7 +196,6 @@ impl DriverQueueStore {
                 id: run_id,
                 doc: run_doc,
                 precondition: Precondition::Absent,
-                options: WriteOptions::default(),
             }];
             let history = docs
                 .query_as::<StoredRun>(
@@ -224,7 +225,6 @@ impl DriverQueueStore {
                         id,
                         doc: serde_json::to_value(stored)?,
                         precondition: Precondition::Version(job_version),
-                        options: WriteOptions::default(),
                     });
                 }
                 None => ops.push(WriteOp::Delete {
@@ -250,7 +250,6 @@ impl DriverQueueStore {
                         not_before_ms: None,
                     })?,
                     precondition: Precondition::Absent,
-                    options: WriteOptions::default(),
                 });
             }
             docs.atomic_batch(ops).await?;
