@@ -22,6 +22,31 @@ adapts `ToolSpec` to whatever runtime it uses; see
 [Adapting to a tool runtime](#adapting-to-a-tool-runtime). The design is
 written up in [`docs/architecture/tools.md`](../../docs/architecture/tools.md).
 
+## Durable queues
+
+Enable the `storage` feature to use `storage::DriverQueueStore` for background
+jobs and `storage::DriverListStore<T>` for pending writes and deletions. The
+host supplies its already-open TinyStorageDrivers backend and scope, and
+composes `storage::storage_schema()` with the other module schemas before
+serving requests. These adapters store one document per queue item and use
+TinyStorageDrivers' atomic claim, visibility lease, and fenced settlement
+ports; storage mode does not replace a whole queue snapshot during processing.
+
+For legacy desktop files, the host reads and decodes the source without
+modifying it, then passes the records and stable IDs to `import_items` or
+`DriverQueueStore::import_legacy`. Repeating an import is safe: existing target
+rows win, and the report distinguishes inserted, identical, and conflicting
+records. FIFO imports should be passed as one ordered batch with stable
+occurrence IDs, including for identical values. Keep the source file until the
+host has verified the imported target.
+
+The default lease clock is the system clock; hosts can inject TinyStorageDrivers'
+clock for deterministic tests. Distributed hosts should keep clocks reasonably
+synchronized at lease-expiry boundaries. A crashed worker's item becomes
+available after its lease expires, so queue execution is at-least-once across
+crashes. A long-running operation can overlap a reclaimed attempt; a lease
+cannot provide exactly-once external side effects.
+
 ## The tools
 
 | Tool | Kind | Arguments | Result |

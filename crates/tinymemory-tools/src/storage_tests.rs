@@ -12,7 +12,7 @@ use tinystoragedrivers_core::{Blocking, MemoryStorage, Precondition, Scope, Stor
 use crate::deletion::{Backoff, DeletionExecutor, DeletionQueue, Drain, PendingDeletion};
 use crate::list_store::ListStore;
 use crate::pending::{Binding, Limits, PendingWrites, WriteExecutor, WriteGate, WriteOperation};
-use crate::queue::{JobQueue, Selection};
+use crate::queue::{JobQueue, JobRun, QueueState, QueueStore, QueuedJob, Selection};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Item {
@@ -238,6 +238,49 @@ async fn driver_claims_are_exclusive_fenced_and_recover_after_expiry() {
 }
 
 #[tokio::test]
+async fn driver_retry_nacks_until_its_visibility_deadline() {
+    let (clock, now) = clock_at(5_000);
+    let backend = backend(clock.clone()).await;
+    let store = list_store(backend, Scope::local(), clock);
+    store
+        .append(
+            "retry",
+            Item {
+                id: "retry".into(),
+                value: "before retry".into(),
+            },
+        )
+        .unwrap();
+    let claim = store
+        .claim_oldest(&[], 5_000, &|item| item.id.clone())
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .retry(
+            &claim,
+            Item {
+                id: "retry".into(),
+                value: "after retry".into(),
+            },
+            Some(5_010),
+        )
+        .unwrap());
+    assert!(store
+        .claim_oldest(&[], 5_009, &|item| item.id.clone())
+        .unwrap()
+        .is_none());
+
+    now.store(5_011, Ordering::SeqCst);
+    let retried = store
+        .claim_oldest(&[], 5_011, &|item| item.id.clone())
+        .unwrap()
+        .expect("nacked item returns when due");
+    assert_eq!(retried.item.value, "after retry");
+    assert!(store.acknowledge(&retried).unwrap());
+    assert!(store.load().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn driver_list_preserves_fifo_scope_and_idempotent_target_wins_import() {
     let (clock, _) = clock_at(10_000);
     let backend = backend(clock.clone()).await;
@@ -393,6 +436,79 @@ async fn two_driver_job_queue_consumers_run_a_healthy_job_once() {
     let state = left.snapshot().await;
     assert!(state.pending.is_empty());
     assert_eq!(state.history.len(), 1);
+}
+
+#[tokio::test]
+async fn driver_queue_import_is_idempotent_and_preserves_newer_target_jobs() {
+    let (clock, _) = clock_at(25_000);
+    let backend = backend(clock.clone()).await;
+    let store = DriverQueueStore::new(
+        backend,
+        Scope::local(),
+        clock,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let now = chrono::Utc::now();
+    let newer = QueuedJob {
+        id: "newer-native-job".into(),
+        root: Namespace::ROOT.to_string(),
+        job: build("native"),
+        queued_at: now,
+        attempts: 0,
+        last_error: None,
+    };
+    let target_wins = QueuedJob {
+        id: "target-wins".into(),
+        root: Namespace::ROOT.to_string(),
+        job: build("new-target-value"),
+        queued_at: now,
+        attempts: 0,
+        last_error: None,
+    };
+    store.enqueue_item(newer.clone()).unwrap();
+    store.enqueue_item(target_wins.clone()).unwrap();
+    let legacy_job = QueuedJob {
+        id: "legacy-job".into(),
+        root: Namespace::ROOT.to_string(),
+        job: build("legacy"),
+        queued_at: now - chrono::Duration::hours(1),
+        attempts: 0,
+        last_error: None,
+    };
+    let legacy_state = QueueState {
+        pending: vec![
+            legacy_job.clone(),
+            QueuedJob {
+                job: build("old-target-value"),
+                ..target_wins.clone()
+            },
+        ],
+        history: vec![JobRun {
+            id: "completed-legacy".into(),
+            job: "build_beliefs".into(),
+            root: Namespace::ROOT.to_string(),
+            ran_at: now - chrono::Duration::days(1),
+            outcome: "done".into(),
+            reason: None,
+            built: Some(3),
+            stored: 0,
+        }],
+    };
+
+    let imported = store.import_legacy(&legacy_state).unwrap();
+    assert_eq!(imported.jobs.imported, 1);
+    assert_eq!(imported.jobs.conflicts, 1);
+    assert_eq!(imported.runs.imported, 1);
+    let repeated = store.import_legacy(&legacy_state).unwrap();
+    assert_eq!(repeated.jobs.identical, 1);
+    assert_eq!(repeated.jobs.conflicts, 1);
+    assert_eq!(repeated.runs.identical, 1);
+    let loaded = store.load();
+    assert_eq!(loaded.pending[0], legacy_job);
+    assert_eq!(loaded.pending[1], newer);
+    assert_eq!(loaded.pending[2], target_wins);
+    assert_eq!(loaded.history, legacy_state.history);
 }
 
 fn learn(text: &str) -> WriteOperation {
