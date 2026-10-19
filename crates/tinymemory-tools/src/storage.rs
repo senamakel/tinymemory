@@ -15,11 +15,11 @@ use serde_json::{Value, json};
 use tinystoragedrivers_core::{
     Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases,
     Owner, Precondition, Query, Scope, ScopeClass, Sort, StorageBackend, StorageError,
-    Version, Versioned, WriteOp, WriteOptions, schema::Schema,
+    Version, WriteOp, WriteOptions, schema::Schema,
 };
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
-use crate::queue::{JobRun, QueueError, QueueState, QueueStore, QueuedJob, Selection, MAX_HISTORY};
+use crate::queue::{JobRun, QueueState, QueueStore, QueuedJob, Selection};
 
 /// Queued background jobs, one document per job.
 pub const JOBS: &str = "tinymemory.jobs";
@@ -33,12 +33,23 @@ pub const DELETIONS: &str = "tinymemory.deletions";
 /// TinyMemory's queue collections. TSD's schema composition adds its own
 /// lease and counter collections when it composes the host's registry.
 #[must_use]
-pub fn storage_schema() -> Schema {
-    Schema::new(Owner::new("tinymemory").expect("static owner is valid"))
+pub fn storage_schema() -> Result<Schema, StorageError> {
+    Ok(Schema::new(Owner::new("tinymemory")?)
         .collection(JOBS, 1, ScopeClass::Tenant)
         .collection(JOB_RUNS, 1, ScopeClass::Tenant)
         .collection(TOOL_WRITES, 1, ScopeClass::Tenant)
-        .collection(DELETIONS, 1, ScopeClass::Tenant)
+        .collection(DELETIONS, 1, ScopeClass::Tenant))
+}
+
+/// Counts from a read-only, idempotent legacy queue import.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportReport {
+    /// Source items inserted into the target.
+    pub imported: usize,
+    /// Source ids already present with identical contents.
+    pub identical: usize,
+    /// Source ids already present with different contents; target rows won.
+    pub conflicts: usize,
 }
 
 static HOLDERS: AtomicU64 = AtomicU64::new(1);
@@ -266,7 +277,7 @@ fn error(error: impl std::fmt::Display) -> StoreError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Stored<T> {
-    sequence: u64,
+    sequence: i64,
     item: T,
     #[serde(default)]
     claimed_epoch: u64,
@@ -399,7 +410,8 @@ where
             if documents.get(collection, &id).await?.is_some() {
                 return Ok(false);
             }
-            let sequence = counters.next("tinymemory", &owner).await?;
+            let sequence = i64::try_from(counters.next("tinymemory", &owner).await?)
+                .map_err(|_| StorageError::invalid_input("queue sequence out of range"))?;
             documents
                 .put_as(
                     collection,
@@ -417,6 +429,59 @@ where
         })
         .map_err(error)?
         .map_err(error)
+    }
+
+    /// Import decoded legacy items without modifying their source. Stable ids
+    /// are supplied by the reader, and imported rows sort before newer native
+    /// appends. Existing target rows are kept and conflicts are counted.
+    pub fn import_items(
+        &self,
+        entries: impl IntoIterator<Item = (String, T)>,
+    ) -> Result<ImportReport, StoreError> {
+        let entries: Vec<_> = entries.into_iter().collect();
+        let len = i64::try_from(entries.len())
+            .map_err(|_| StoreError("legacy queue is too large".into()))?;
+        let storage = self.storage()?;
+        let blocking = self.blocking.clone();
+        let collection = self.collection;
+        blocking
+            .run(async move {
+                let documents = storage.documents().clone();
+                let mut report = ImportReport::default();
+                for (index, (id, item)) in entries.into_iter().enumerate() {
+                    match documents.get_as::<Stored<T>>(collection, &id).await? {
+                        Some(existing) => {
+                            if serde_json::to_value(existing.doc.item)? == serde_json::to_value(item)? {
+                                report.identical += 1;
+                            } else {
+                                report.conflicts += 1;
+                            }
+                        }
+                        None => {
+                            let sequence = i64::try_from(index)
+                                .map_err(|_| StorageError::invalid_input("legacy order out of range"))?
+                                - len;
+                            documents
+                                .put_as(
+                                    collection,
+                                    &id,
+                                    &Stored {
+                                        sequence,
+                                        item,
+                                        claimed_epoch: 0,
+                                        not_before_ms: None,
+                                    },
+                                    Precondition::Absent,
+                                )
+                                .await?;
+                            report.imported += 1;
+                        }
+                    }
+                }
+                Ok::<_, StorageError>(report)
+            })
+            .map_err(error)?
+            .map_err(error)
     }
 
     fn claim_item(

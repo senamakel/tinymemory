@@ -13,13 +13,13 @@
 //! The crate links no executor and does no I/O: the host supplies the store
 //! and the [`DeletionExecutor`] that does the forget.
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures::lock::Mutex as AsyncMutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::list_store::ListStore;
 
@@ -108,6 +108,15 @@ struct Retry {
     not_before: DateTime<Utc>,
 }
 
+fn deletion_id(deletion: &PendingDeletion) -> String {
+    let mut digest = Sha256::new();
+    digest.update(serde_json::to_vec(deletion).unwrap_or_default());
+    digest.finalize()[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// A durable queue of [`PendingDeletion`]s.
 pub struct DeletionQueue<S: ListStore<PendingDeletion>> {
     store: S,
@@ -116,7 +125,7 @@ pub struct DeletionQueue<S: ListStore<PendingDeletion>> {
     lock: Mutex<()>,
     /// Serialises drains, so two triggers never run one deletion twice.
     draining: AsyncMutex<()>,
-    retries: Mutex<HashMap<PendingDeletion, Retry>>,
+    retries: Mutex<std::collections::HashMap<PendingDeletion, Retry>>,
 }
 
 impl<S: ListStore<PendingDeletion>> std::fmt::Debug for DeletionQueue<S> {
@@ -153,17 +162,11 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
         })
     }
 
-    fn write(&self, all: &[PendingDeletion]) {
-        if let Err(error) = self.store.save(all) {
-            log::warn!("[tinymemory:deletion] writing pending deletions failed: {error}");
-        }
-    }
-
     /// Records `deletion` to run on the next drain. One already queued is not
     /// queued twice.
     pub fn enqueue(&self, deletion: PendingDeletion) {
         let _guard = self.locked();
-        let mut all = self.read();
+        let all = self.read();
         if all.contains(&deletion) {
             return;
         }
@@ -171,8 +174,10 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
             "[tinymemory:deletion] {} deletion queued until memory is reachable",
             deletion.label()
         );
-        all.push(deletion);
-        self.write(&all);
+        let id = deletion_id(&deletion);
+        if let Err(error) = self.store.append(&id, deletion) {
+            log::warn!("[tinymemory:deletion] writing pending deletion failed: {error}");
+        }
     }
 
     /// Every deletion still owed, oldest first.
@@ -180,16 +185,6 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
     pub fn pending(&self) -> Vec<PendingDeletion> {
         let _guard = self.locked();
         self.read()
-    }
-
-    fn settle(&self, deletion: &PendingDeletion) {
-        let _guard = self.locked();
-        let mut all = self.read();
-        let before = all.len();
-        all.retain(|queued| queued != deletion);
-        if all.len() != before {
-            self.write(&all);
-        }
     }
 
     fn retries(&self) -> std::sync::MutexGuard<'_, HashMap<PendingDeletion, Retry>> {
@@ -209,30 +204,45 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
     ) -> usize {
         let _draining = self.draining.lock().await;
         let queued = self.pending();
-        if queued.is_empty() {
-            return 0;
-        }
-        if !executor.is_reachable() {
+        if queued.is_empty() || !executor.is_reachable() {
+            if !queued.is_empty() {
             log::debug!(
                 "[tinymemory:deletion] memory off; {} pending deletions wait",
                 queued.len()
             );
+            }
             return 0;
         }
         let mut settled = 0;
-        for deletion in queued {
-            if mode == Drain::Due
-                && self
-                    .retries()
-                    .get(&deletion)
-                    .is_some_and(|retry| retry.not_before > now)
-            {
-                log::debug!("[tinymemory:deletion] {} backing off", deletion.label());
-                continue;
-            }
+        let mut excluded: Vec<String> = if mode == Drain::Due {
+            let retries = self.retries();
+            queued
+                .iter()
+                .filter(|deletion| {
+                    retries
+                        .get(*deletion)
+                        .is_some_and(|retry| retry.not_before > now)
+                })
+                .map(|deletion| deletion_id(deletion))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for _ in 0..queued.len() {
+            let eligible_at = if mode == Drain::Force {
+                i64::MAX
+            } else {
+                now.timestamp_millis()
+            };
+            let claim = self.store.claim_oldest(&excluded, eligible_at);
+            let Ok(Some(claim)) = claim else { break };
+            let deletion = claim.item.clone();
+            excluded.push(claim.id.clone());
             match executor.run(&deletion).await {
                 Ok(forgotten) => {
-                    self.settle(&deletion);
+                    if !self.store.acknowledge(&claim).unwrap_or(false) {
+                        continue;
+                    }
                     self.retries().remove(&deletion);
                     settled += 1;
                     log::info!(
@@ -243,12 +253,18 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
                 Err(code) => {
                     let mut retries = self.retries();
                     let failures = retries.get(&deletion).map_or(0, |r| r.failures) + 1;
+                    let not_before = now + self.backoff.delay(failures);
                     retries.insert(
                         deletion.clone(),
                         Retry {
                             failures,
-                            not_before: now + self.backoff.delay(failures),
+                            not_before,
                         },
+                    );
+                    let _ = self.store.retry(
+                        &claim,
+                        deletion.clone(),
+                        Some(not_before.timestamp_millis()),
                     );
                     log::warn!(
                         "[tinymemory:deletion] {} deletion failed code={code} failures={failures}; kept",
