@@ -9,7 +9,7 @@ use tinymemory_api::conformance::ReferenceEngine;
 use tinymemory_api::{LearningKind, MemoryMeta, Namespace, StoreItem};
 use tinystoragedrivers_core::schema::Registry;
 use tinystoragedrivers_core::{
-    Blocking, Clock, MemoryStorage, Precondition, Scope, StorageBackend,
+    Blocking, Clock, DocumentStoreExt, MemoryStorage, Precondition, Scope, StorageBackend,
 };
 
 use crate::deletion::{Backoff, DeletionExecutor, DeletionQueue, Drain, PendingDeletion};
@@ -45,7 +45,7 @@ fn list_store(
     scope: Scope,
     clock: Clock,
 ) -> DriverListStore<Item> {
-    DriverListStore::new(
+    DriverListStore::<Item>::new(
         backend,
         scope,
         TOOL_WRITES,
@@ -66,7 +66,7 @@ fn readiness_store(
     backend: Arc<dyn StorageBackend>,
     clock: Clock,
 ) -> DriverListStore<ReadinessItem> {
-    DriverListStore::new(
+    DriverListStore::<ReadinessItem>::new(
         backend,
         Scope::local(),
         TOOL_WRITES,
@@ -81,7 +81,7 @@ fn deletion_store(
     backend: Arc<dyn StorageBackend>,
     clock: Clock,
 ) -> DriverListStore<PendingDeletion> {
-    DriverListStore::new(
+    DriverListStore::<PendingDeletion>::new(
         backend,
         Scope::local(),
         DELETIONS,
@@ -99,7 +99,7 @@ fn pending_store(
     backend: Arc<dyn StorageBackend>,
     clock: Clock,
 ) -> DriverListStore<crate::pending::Entry> {
-    DriverListStore::new(
+    DriverListStore::<crate::pending::Entry>::new(
         backend,
         Scope::local(),
         TOOL_WRITES,
@@ -432,13 +432,23 @@ async fn concurrent_import_handles_reread_absent_insert_conflicts() {
     let left_barrier = Arc::clone(&after_absent);
     let left = std::thread::spawn(move || {
         first
-            .import_items_with_hook(entries(), Arc::new(move |_| left_barrier.wait()))
+            .import_items_with_hook(
+                entries(),
+                Arc::new(move |_| {
+                    left_barrier.wait();
+                }),
+            )
             .unwrap()
     });
     let right_barrier = Arc::clone(&after_absent);
     let right = std::thread::spawn(move || {
         second
-            .import_items_with_hook(entries(), Arc::new(move |_| right_barrier.wait()))
+            .import_items_with_hook(
+                entries(),
+                Arc::new(move |_| {
+                    right_barrier.wait();
+                }),
+            )
             .unwrap()
     });
     let left = left.join().unwrap();
