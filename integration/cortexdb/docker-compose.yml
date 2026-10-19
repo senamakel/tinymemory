@@ -5,6 +5,8 @@ name: tinymemory-cortexdb
 
 services:
   cortex:
+    # Official v0.8.21 release from github.com/cortexdbai/cortexdb-releases.
+    # Pin the multi-platform OCI index so CI and local runs use the same image.
     image: ${CORTEXDB_IMAGE:-cortexdb/cortexdb@sha256:f38e6f4573d1585aa37d87ef76d70eb3bf6681dbf7e30c2ebf2f6d91176f6be5}
     command: ["3141", "/data"]
     environment:
