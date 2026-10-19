@@ -205,7 +205,11 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
             }
             let claim = self
                 .store
-                .claim_oldest(&[], chrono::Utc::now().timestamp_millis());
+                .claim_oldest(
+                    &[],
+                    chrono::Utc::now().timestamp_millis(),
+                    &|entry| entry.ticket.clone(),
+                );
             let Ok(Some(claim)) = claim else { break };
             let entry = claim.item.clone();
             if gate.generation() != generation || !accepts(&entry) {

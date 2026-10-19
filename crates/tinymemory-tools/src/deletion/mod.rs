@@ -234,7 +234,9 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
             } else {
                 now.timestamp_millis()
             };
-            let claim = self.store.claim_oldest(&excluded, eligible_at);
+            let claim = self
+                .store
+                .claim_oldest(&excluded, eligible_at, &deletion_id);
             let Ok(Some(claim)) = claim else { break };
             let deletion = claim.item.clone();
             excluded.push(claim.id.clone());
