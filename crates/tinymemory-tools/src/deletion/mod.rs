@@ -206,10 +206,10 @@ impl<S: ListStore<PendingDeletion>> DeletionQueue<S> {
         let queued = self.pending();
         if queued.is_empty() || !executor.is_reachable() {
             if !queued.is_empty() {
-            log::debug!(
-                "[tinymemory:deletion] memory off; {} pending deletions wait",
-                queued.len()
-            );
+                log::debug!(
+                    "[tinymemory:deletion] memory off; {} pending deletions wait",
+                    queued.len()
+                );
             }
             return 0;
         }

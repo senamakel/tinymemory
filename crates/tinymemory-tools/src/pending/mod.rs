@@ -170,19 +170,15 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
     /// [`PendingError::Unavailable`] when the store cannot be read or written.
     pub fn clear_stale(&self, process: &str, generation: u64) -> Result<usize, PendingError> {
         let _guard = self.locked();
-        let entries = self.read()?;
-        let mut removed = 0;
-        for entry in entries {
-            if entry
-                .epoch
-                .as_ref()
-                .is_none_or(|epoch| epoch.process != process || epoch.generation < generation)
-                && self.store.remove(&entry.ticket).map_err(|StoreError(_)| PendingError::Unavailable)?
-            {
-                removed += 1;
-            }
-        }
-        Ok(removed)
+        self.read()?;
+        self.store
+            .remove_matching(&|entry| {
+                entry
+                    .epoch
+                    .as_ref()
+                    .is_none_or(|epoch| epoch.process != process || epoch.generation < generation)
+            })
+            .map_err(|StoreError(_)| PendingError::Unavailable)
     }
 
     /// Runs queued writes oldest first through `executor`, settling each that
@@ -207,7 +203,9 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
             if gate.generation() != generation {
                 break;
             }
-            let claim = self.store.claim_oldest(&[], chrono::Utc::now().timestamp_millis());
+            let claim = self
+                .store
+                .claim_oldest(&[], chrono::Utc::now().timestamp_millis());
             let Ok(Some(claim)) = claim else { break };
             let entry = claim.item.clone();
             if gate.generation() != generation || !accepts(&entry) {

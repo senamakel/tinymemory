@@ -93,7 +93,12 @@ pub trait ListStore<T>: Send + Sync {
     }
 
     /// Retain an item after failure, recording an optional retry deadline.
-    fn retry(&self, claim: &ItemClaim<T>, item: T, _not_before_ms: Option<i64>) -> Result<bool, StoreError> {
+    fn retry(
+        &self,
+        claim: &ItemClaim<T>,
+        item: T,
+        _not_before_ms: Option<i64>,
+    ) -> Result<bool, StoreError> {
         let mut entries = self.load()?;
         if entries.is_empty() {
             return Ok(false);
@@ -107,6 +112,19 @@ pub trait ListStore<T>: Send + Sync {
     /// Remove one item by its stable id, used for erasure fencing.
     fn remove(&self, _id: &str) -> Result<bool, StoreError> {
         Ok(false)
+    }
+
+    /// Remove items matched by an owner predicate. Driver stores should
+    /// override `remove` for stable-id compare-and-delete semantics.
+    fn remove_matching(&self, predicate: &dyn Fn(&T) -> bool) -> Result<usize, StoreError> {
+        let mut entries = self.load()?;
+        let before = entries.len();
+        entries.retain(|entry| !predicate(entry));
+        let removed = before - entries.len();
+        if removed > 0 {
+            self.save(&entries)?;
+        }
+        Ok(removed)
     }
 }
 

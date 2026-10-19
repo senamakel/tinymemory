@@ -13,9 +13,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tinystoragedrivers_core::{
-    Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases,
-    Owner, Precondition, Query, Scope, ScopeClass, Sort, StorageBackend, StorageError,
-    Version, WriteOp, WriteOptions, schema::Schema,
+    Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases, Owner,
+    Precondition, Query, Scope, ScopeClass, Sort, StorageBackend, StorageError, Version, WriteOp,
+    WriteOptions, schema::Schema,
 };
 
 use crate::list_store::{ItemClaim, ListStore, StoreError};
@@ -52,21 +52,36 @@ pub struct ImportReport {
     pub conflicts: usize,
 }
 
+/// Per-family outcomes from importing a legacy whole-state job snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueueImportReport {
+    /// Pending job outcomes.
+    pub jobs: ImportReport,
+    /// History row outcomes.
+    pub runs: ImportReport,
+}
+
 static HOLDERS: AtomicU64 = AtomicU64::new(1);
 
 fn holder_id() -> String {
-    format!("{}-{}", std::process::id(), HOLDERS.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "{}-{}",
+        std::process::id(),
+        HOLDERS.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn system_clock() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredRun {
-    sequence: u64,
+    sequence: i64,
     run: JobRun,
 }
 
@@ -107,6 +122,74 @@ impl DriverQueueStore {
         )
     }
 
+    /// Import a decoded legacy snapshot without changing its source file.
+    /// Stable job ids are retained, duplicate imports are harmless, and
+    /// conflicting target rows win and are reported.
+    pub fn import_legacy(&self, state: &QueueState) -> Result<QueueImportReport, StoreError> {
+        let jobs = self.jobs.import_items(
+            state
+                .pending
+                .iter()
+                .map(|job| (job.id.clone(), job.clone())),
+        )?;
+        let history = state.history.clone();
+        let storage = self.jobs.storage()?;
+        let blocking = self.jobs.blocking.clone();
+        blocking
+            .run(async move {
+                let docs = storage.documents().clone();
+                let count = i64::try_from(history.len())
+                    .map_err(|_| StorageError::invalid_input("legacy history is too large"))?;
+                let mut report = ImportReport::default();
+                for (index, run) in history.into_iter().enumerate() {
+                    let body = serde_json::to_value(&run)?;
+                    let digest = Sha256::digest(serde_json::to_vec(&(index, &run))?);
+                    let suffix = digest[..8]
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    let id = format!("legacy-{index}-{suffix}");
+                    match docs.get_as::<StoredRun>(JOB_RUNS, &id).await? {
+                        Some(found) => {
+                            if serde_json::to_value(found.doc.run)? == body {
+                                report.identical += 1;
+                            } else {
+                                report.conflicts += 1;
+                            }
+                        }
+                        None => {
+                            let sequence = i64::try_from(index).map_err(|_| {
+                                StorageError::invalid_input("legacy order out of range")
+                            })? - count;
+                            let value = StoredRun { sequence, run };
+                            match docs
+                                .put_as(JOB_RUNS, &id, &value, Precondition::Absent)
+                                .await
+                            {
+                                Ok(_) => report.imported += 1,
+                                Err(error) => {
+                                    let Some(found) =
+                                        docs.get_as::<StoredRun>(JOB_RUNS, &id).await?
+                                    else {
+                                        return Err(error);
+                                    };
+                                    if serde_json::to_value(found.doc.run)? == body {
+                                        report.identical += 1;
+                                    } else {
+                                        report.conflicts += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok::<_, StorageError>(report)
+            })
+            .map(|runs| QueueImportReport { jobs, runs })
+            .map_err(error)?
+            .map_err(error)
+    }
+
     fn load_runs(&self) -> Result<Vec<JobRun>, StoreError> {
         let storage = self.jobs.storage()?;
         let blocking = self.jobs.blocking.clone();
@@ -121,6 +204,7 @@ impl DriverQueueStore {
                     let Some(cursor) = page.next else { break };
                     query = query.after(cursor);
                 }
+                runs.truncate(crate::queue::MAX_HISTORY);
                 Ok::<_, StorageError>(runs)
             })
             .map_err(error)?
@@ -146,7 +230,6 @@ impl DriverQueueStore {
         let job_version = Version(claim.version);
         let ttl_ms = self.jobs.lease_ms;
         let run_id = format!("{}-{epoch}", claim.id);
-        let run_owner = JOB_RUNS.to_owned();
         let result = self.jobs.run(async move {
             let Some(lease) = leases
                 .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl_ms)
@@ -163,7 +246,9 @@ impl DriverQueueStore {
             if current.version != job_version {
                 return Ok(false);
             }
-            let sequence = Counters::new(docs).next("tinymemory", JOB_RUNS).await?;
+            let sequence =
+                i64::try_from(Counters::new(docs).next("tinymemory", JOB_RUNS).await?)
+                    .map_err(|_| StorageError::invalid_input("history sequence out of range"))?;
             let run_doc = serde_json::to_value(StoredRun { sequence, run })?;
             let mut ops = vec![WriteOp::Put {
                 collection: JOB_RUNS.to_owned(),
@@ -195,10 +280,11 @@ impl DriverQueueStore {
             let _ = leases
                 .release("tinymemory.queue", &lease_key, &holder, epoch)
                 .await?;
-            let _ = run_owner;
             Ok(true)
         });
-        result.map_err(|err| err.to_string())?.map_err(|err| err.to_string())
+        result
+            .map_err(|err| err.to_string())?
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -213,7 +299,10 @@ impl QueueStore for DriverQueueStore {
         // Legacy snapshot import compatibility only. JobQueue production
         // mutations use enqueue_item/claim_next/settle below.
         for job in &state.pending {
-            let _ = self.jobs.append(&job.id, job.clone()).map_err(|err| err.to_string())?;
+            let _ = self
+                .jobs
+                .append(&job.id, job.clone())
+                .map_err(|err| err.to_string())?;
         }
         let storage = self.jobs.storage().map_err(|err| err.to_string())?;
         let blocking = self.jobs.blocking.clone();
@@ -240,7 +329,9 @@ impl QueueStore for DriverQueueStore {
     }
 
     fn enqueue_item(&self, job: QueuedJob) -> Result<bool, String> {
-        self.jobs.append(&job.id, job).map_err(|err| err.to_string())
+        self.jobs
+            .append(&job.id, job)
+            .map_err(|err| err.to_string())
     }
 
     fn claim_next(
@@ -451,16 +542,18 @@ where
                 for (index, (id, item)) in entries.into_iter().enumerate() {
                     match documents.get_as::<Stored<T>>(collection, &id).await? {
                         Some(existing) => {
-                            if serde_json::to_value(existing.doc.item)? == serde_json::to_value(item)? {
+                            if serde_json::to_value(existing.doc.item)?
+                                == serde_json::to_value(item)?
+                            {
                                 report.identical += 1;
                             } else {
                                 report.conflicts += 1;
                             }
                         }
                         None => {
-                            let sequence = i64::try_from(index)
-                                .map_err(|_| StorageError::invalid_input("legacy order out of range"))?
-                                - len;
+                            let sequence = i64::try_from(index).map_err(|_| {
+                                StorageError::invalid_input("legacy order out of range")
+                            })? - len;
                             documents
                                 .put_as(
                                     collection,
@@ -518,10 +611,14 @@ where
                     continue;
                 };
                 let patch = json!({"claimed_epoch": lease.epoch});
+                let due = Filter::exists("not_before_ms", false)
+                    .or(Filter::lte("not_before_ms", eligible_at_ms));
                 let claimed = documents
                     .claim(
                         collection,
-                        &Filter::eq("_id", candidate.id.clone()),
+                        &Filter::eq("_id", candidate.id.clone())
+                            .and(Filter::eq("sequence", candidate.doc.sequence))
+                            .and(due),
                         &[],
                         &patch,
                     )
@@ -601,11 +698,20 @@ where
                     current.doc.not_before_ms = not_before_ms;
                     current.doc.claimed_epoch = epoch;
                     documents
-                        .put_as(collection, &id, &current.doc, Precondition::Version(version))
+                        .put_as(
+                            collection,
+                            &id,
+                            &current.doc,
+                            Precondition::Version(version),
+                        )
                         .await?;
                     true
                 }
-                None => documents.delete(collection, &id, Precondition::Version(version)).await?,
+                None => {
+                    documents
+                        .delete(collection, &id, Precondition::Version(version))
+                        .await?
+                }
             };
             let _ = leases
                 .release("tinymemory.queue", &lease_key, &holder, epoch)
@@ -657,7 +763,8 @@ where
                     .run(async move {
                         let docs = storage.documents();
                         if let Some(row) = docs.get(collection, &id).await? {
-                            docs.delete(collection, &id, Precondition::Version(row.version)).await?;
+                            docs.delete(collection, &id, Precondition::Version(row.version))
+                                .await?;
                         }
                         Ok::<_, StorageError>(())
                     })
@@ -708,7 +815,37 @@ where
                 let Some(row) = docs.get(collection, &id).await? else {
                     return Ok(false);
                 };
-                docs.delete(collection, &id, Precondition::Version(row.version)).await
+                docs.delete(collection, &id, Precondition::Version(row.version))
+                    .await
+            })
+            .map_err(error)?
+            .map_err(error)
+    }
+
+    fn remove_matching(&self, predicate: &dyn Fn(&T) -> bool) -> Result<usize, StoreError> {
+        let items = self
+            .load()
+            .into_iter()
+            .filter(|item| predicate(item))
+            .map(|item| (self.id_of)(&item))
+            .collect::<Vec<_>>();
+        let storage = self.storage()?;
+        let blocking = self.blocking.clone();
+        let collection = self.collection;
+        blocking
+            .run(async move {
+                let docs = storage.documents();
+                let mut removed = 0;
+                for id in items {
+                    if let Some(row) = docs.get(collection, &id).await?
+                        && docs
+                            .delete(collection, &id, Precondition::Version(row.version))
+                            .await?
+                    {
+                        removed += 1;
+                    }
+                }
+                Ok::<_, StorageError>(removed)
             })
             .map_err(error)?
             .map_err(error)
