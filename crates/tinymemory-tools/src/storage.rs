@@ -1,0 +1,658 @@
+//! Driver-backed, per-item queue stores.
+//!
+//! The adapters use TinyStorageDrivers ports only. Each queue item is one
+//! versioned document; TSD atomic claims and fenced writes coordinate
+//! independent consumers. No database driver is linked by this crate.
+
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tinystoragedrivers_core::{
+    Blocking, Clock, Counters, DocumentStore, DocumentStoreExt, Filter, Leases,
+    Owner, Precondition, Query, Scope, ScopeClass, Sort, StorageBackend, StorageError,
+    Version, Versioned, WriteOp, WriteOptions, schema::Schema,
+};
+
+use crate::list_store::{ItemClaim, ListStore, StoreError};
+use crate::queue::{JobRun, QueueError, QueueState, QueueStore, QueuedJob, Selection, MAX_HISTORY};
+
+/// Queued background jobs, one document per job.
+pub const JOBS: &str = "tinymemory.jobs";
+/// Job execution history, one document per run.
+pub const JOB_RUNS: &str = "tinymemory.job_runs";
+/// Queued tool writes, one document per write.
+pub const TOOL_WRITES: &str = "tinymemory.tool_writes";
+/// Queued deletions, one document per deletion occurrence.
+pub const DELETIONS: &str = "tinymemory.deletions";
+
+/// TinyMemory's queue collections. TSD's schema composition adds its own
+/// lease and counter collections when it composes the host's registry.
+#[must_use]
+pub fn storage_schema() -> Schema {
+    Schema::new(Owner::new("tinymemory").expect("static owner is valid"))
+        .collection(JOBS, 1, ScopeClass::Tenant)
+        .collection(JOB_RUNS, 1, ScopeClass::Tenant)
+        .collection(TOOL_WRITES, 1, ScopeClass::Tenant)
+        .collection(DELETIONS, 1, ScopeClass::Tenant)
+}
+
+static HOLDERS: AtomicU64 = AtomicU64::new(1);
+
+fn holder_id() -> String {
+    format!("{}-{}", std::process::id(), HOLDERS.fetch_add(1, Ordering::Relaxed))
+}
+
+fn system_clock() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredRun {
+    sequence: u64,
+    run: JobRun,
+}
+
+/// A background job queue backed by one document per job and run.
+pub struct DriverQueueStore {
+    jobs: DriverListStore<QueuedJob>,
+}
+
+impl std::fmt::Debug for DriverQueueStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DriverQueueStore").field(&self.jobs).finish()
+    }
+}
+
+impl DriverQueueStore {
+    /// Open the driver-backed job queue for one scope.
+    pub fn new(
+        backend: Arc<dyn StorageBackend>,
+        scope: Scope,
+        clock: Clock,
+        lease: Duration,
+    ) -> Result<Self, StoreError> {
+        Ok(Self {
+            jobs: DriverListStore::new(backend, scope, JOBS, clock, lease, |job| job.id.clone())?,
+        })
+    }
+
+    /// Open with the standard system clock and a 30-second visibility lease.
+    pub fn system_clock(
+        backend: Arc<dyn StorageBackend>,
+        scope: Scope,
+    ) -> Result<Self, StoreError> {
+        Self::new(
+            backend,
+            scope,
+            Arc::new(system_clock),
+            Duration::from_secs(30),
+        )
+    }
+
+    fn load_runs(&self) -> Result<Vec<JobRun>, StoreError> {
+        let storage = self.jobs.storage()?;
+        let blocking = self.jobs.blocking.clone();
+        blocking
+            .run(async move {
+                let documents = storage.documents().clone();
+                let mut query = Query::all().sort(Sort::desc("sequence")).limit(256);
+                let mut runs = Vec::new();
+                loop {
+                    let page = documents.query_as::<StoredRun>(JOB_RUNS, &query).await?;
+                    runs.extend(page.items.into_iter().map(|row| row.doc.run));
+                    let Some(cursor) = page.next else { break };
+                    query = query.after(cursor);
+                }
+                Ok::<_, StorageError>(runs)
+            })
+            .map_err(error)?
+            .map_err(error)
+    }
+
+    fn settle_claim(
+        &self,
+        claim: &ItemClaim<QueuedJob>,
+        replacement: Option<QueuedJob>,
+        run: JobRun,
+    ) -> Result<bool, String> {
+        let storage = self.jobs.storage().map_err(|err| err.to_string())?;
+        let documents = storage.documents().clone();
+        let leases = Leases::new(&documents).with_clock(self.jobs.clock.clone());
+        let backend = Arc::clone(&self.jobs.backend);
+        let scope = self.jobs.scope.clone();
+        let collection = JOBS;
+        let id = claim.id.clone();
+        let lease_key = claim.lease_key.clone();
+        let holder = claim.holder.clone();
+        let epoch = claim.epoch;
+        let job_version = Version(claim.version);
+        let ttl_ms = self.jobs.lease_ms;
+        let run_id = format!("{}-{epoch}", claim.id);
+        let run_owner = JOB_RUNS.to_owned();
+        let result = self.jobs.run(async move {
+            let Some(lease) = leases
+                .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl_ms)
+                .await?
+            else {
+                return Ok(false);
+            };
+            let fenced = backend.for_scope_fenced(&scope, &lease.fence(&scope))?;
+            let docs = fenced.documents();
+            let current = docs
+                .get_as::<Stored<QueuedJob>>(collection, &id)
+                .await?
+                .ok_or_else(|| StorageError::conflict("claimed job disappeared"))?;
+            if current.version != job_version {
+                return Ok(false);
+            }
+            let sequence = Counters::new(docs).next("tinymemory", JOB_RUNS).await?;
+            let run_doc = serde_json::to_value(StoredRun { sequence, run })?;
+            let mut ops = vec![WriteOp::Put {
+                collection: JOB_RUNS.to_owned(),
+                id: run_id,
+                doc: run_doc,
+                precondition: Precondition::Absent,
+                options: WriteOptions::default(),
+            }];
+            match replacement {
+                Some(job) => {
+                    let mut stored = current.doc;
+                    stored.item = job;
+                    stored.claimed_epoch = epoch;
+                    ops.push(WriteOp::Put {
+                        collection: collection.to_owned(),
+                        id,
+                        doc: serde_json::to_value(stored)?,
+                        precondition: Precondition::Version(job_version),
+                        options: WriteOptions::default(),
+                    });
+                }
+                None => ops.push(WriteOp::Delete {
+                    collection: collection.to_owned(),
+                    id,
+                    precondition: Precondition::Version(job_version),
+                }),
+            }
+            docs.atomic_batch(ops).await?;
+            let _ = leases
+                .release("tinymemory.queue", &lease_key, &holder, epoch)
+                .await?;
+            let _ = run_owner;
+            Ok(true)
+        });
+        result.map_err(|err| err.to_string())?.map_err(|err| err.to_string())
+    }
+}
+
+impl QueueStore for DriverQueueStore {
+    fn load(&self) -> QueueState {
+        let pending = self.jobs.load().unwrap_or_else(|_| Vec::new());
+        let history = self.load_runs().unwrap_or_else(|_| Vec::new());
+        QueueState { pending, history }
+    }
+
+    fn save(&self, state: &QueueState) -> Result<(), String> {
+        // Legacy snapshot import compatibility only. JobQueue production
+        // mutations use enqueue_item/claim_next/settle below.
+        for job in &state.pending {
+            let _ = self.jobs.append(&job.id, job.clone()).map_err(|err| err.to_string())?;
+        }
+        let storage = self.jobs.storage().map_err(|err| err.to_string())?;
+        let blocking = self.jobs.blocking.clone();
+        let history = state.history.clone();
+        blocking
+            .run(async move {
+                let docs = storage.documents();
+                let counters = Counters::new(docs);
+                for run in history {
+                    let sequence = counters.next("tinymemory", JOB_RUNS).await?;
+                    let id = format!("{}-{sequence}", run.id);
+                    docs.put_as(
+                        JOB_RUNS,
+                        &id,
+                        &StoredRun { sequence, run },
+                        Precondition::Absent,
+                    )
+                    .await?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .map_err(|err| err.to_string())?
+            .map_err(|err| err.to_string())
+    }
+
+    fn enqueue_item(&self, job: QueuedJob) -> Result<bool, String> {
+        self.jobs.append(&job.id, job).map_err(|err| err.to_string())
+    }
+
+    fn claim_next(
+        &self,
+        selection: &Selection,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        excluded: &[String],
+    ) -> Result<Option<(QueuedJob, ItemClaim<QueuedJob>)>, String> {
+        let selection = selection.clone();
+        let claim = self
+            .jobs
+            .claim_matching(excluded, i64::MAX, move |job| match &selection {
+                Selection::Due => job.queued_at <= cutoff,
+                Selection::All => true,
+                Selection::One(id) => &job.id == id,
+            })
+            .map_err(|err| err.to_string())?;
+        Ok(claim.map(|claim| (claim.item.clone(), claim)))
+    }
+
+    fn settle(
+        &self,
+        claim: &ItemClaim<QueuedJob>,
+        replacement: Option<QueuedJob>,
+        run: JobRun,
+    ) -> Result<bool, String> {
+        self.settle_claim(claim, replacement, run)
+    }
+}
+
+fn error(error: impl std::fmt::Display) -> StoreError {
+    StoreError(error.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Stored<T> {
+    sequence: u64,
+    item: T,
+    #[serde(default)]
+    claimed_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    not_before_ms: Option<i64>,
+}
+
+/// A list-shaped queue backed by one TSD document per item.
+///
+/// The injected TSD clock controls lease acquisition and renewal in tests. The
+/// default clock is the system clock; distributed deployments therefore need
+/// reasonably synchronized clocks for expiration boundaries. A crashed
+/// consumer's lease eventually expires and the job is delivered again, so
+/// effects are at-least-once across crashes and a long operation may overlap
+/// its retry after its visibility lease expires.
+pub struct DriverListStore<T> {
+    backend: Arc<dyn StorageBackend>,
+    scope: Scope,
+    blocking: Blocking,
+    clock: Clock,
+    holder: String,
+    collection: &'static str,
+    lease_ms: i64,
+    id_of: Arc<dyn Fn(&T) -> String + Send + Sync>,
+    _item: PhantomData<fn() -> T>,
+}
+
+impl<T> std::fmt::Debug for DriverListStore<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DriverListStore")
+            .field("scope", &self.scope)
+            .field("collection", &self.collection)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> DriverListStore<T>
+where
+    T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    /// Open a list store over a host-owned backend and scope.
+    ///
+    /// `id_of` must return a stable, unique id for this occurrence. In
+    /// particular, callers importing a FIFO file must supply occurrence ids
+    /// so identical values at distinct positions remain distinct.
+    pub fn new(
+        backend: Arc<dyn StorageBackend>,
+        scope: Scope,
+        collection: &'static str,
+        clock: Clock,
+        lease: Duration,
+        id_of: impl Fn(&T) -> String + Send + Sync + 'static,
+    ) -> Result<Self, StoreError> {
+        let lease_ms = i64::try_from(lease.as_millis())
+            .ok()
+            .filter(|millis| *millis > 0)
+            .ok_or_else(|| StoreError("lease duration must be positive".into()))?;
+        let blocking = Blocking::new().map_err(error)?;
+        Ok(Self {
+            backend,
+            scope,
+            blocking,
+            clock,
+            holder: holder_id(),
+            collection,
+            lease_ms,
+            id_of: Arc::new(id_of),
+            _item: PhantomData,
+        })
+    }
+
+    /// Use the TSD system clock and a 30-second visibility lease.
+    pub fn system_clock(
+        backend: Arc<dyn StorageBackend>,
+        scope: Scope,
+        collection: &'static str,
+        id_of: impl Fn(&T) -> String + Send + Sync + 'static,
+    ) -> Result<Self, StoreError> {
+        Self::new(
+            backend,
+            scope,
+            collection,
+            Arc::new(system_clock),
+            Duration::from_secs(30),
+            id_of,
+        )
+    }
+
+    fn storage(&self) -> Result<tinystoragedrivers_core::ScopedStorage, StoreError> {
+        self.backend.for_scope(&self.scope).map_err(error)
+    }
+
+    fn run<R: Send + 'static>(
+        &self,
+        future: impl std::future::Future<Output = R> + Send + 'static,
+    ) -> Result<R, StoreError> {
+        self.blocking.run(future).map_err(error)
+    }
+
+    fn lease_key(&self, id: &str) -> String {
+        format!("{}:{id}", self.collection)
+    }
+
+    fn leases(&self) -> Result<Leases, StoreError> {
+        let documents = self.storage()?.documents().clone();
+        Ok(Leases::new(&documents).with_clock(self.clock.clone()))
+    }
+
+    async fn all_documents(
+        documents: Arc<dyn DocumentStore>,
+        collection: &'static str,
+    ) -> tinystoragedrivers_core::Result<Vec<Versioned<Stored<T>>>> {
+        let mut query = Query::all().sort(Sort::asc("sequence")).limit(256);
+        let mut items = Vec::new();
+        loop {
+            let page = documents.query_as::<Stored<T>>(collection, &query).await?;
+            items.extend(page.items);
+            let Some(cursor) = page.next else { break };
+            query = query.after(cursor);
+        }
+        Ok(items)
+    }
+
+    fn append_item(&self, id: String, item: T) -> Result<bool, StoreError> {
+        let documents = self.storage()?.documents().clone();
+        let counters = Counters::new(&documents);
+        let collection = self.collection;
+        let owner = self.collection.to_owned();
+        self.run(async move {
+            if documents.get(collection, &id).await?.is_some() {
+                return Ok(false);
+            }
+            let sequence = counters.next("tinymemory", &owner).await?;
+            documents
+                .put_as(
+                    collection,
+                    &id,
+                    &Stored {
+                        sequence,
+                        item,
+                        claimed_epoch: 0,
+                        not_before_ms: None,
+                    },
+                    Precondition::Absent,
+                )
+                .await?;
+            Ok(true)
+        })
+        .map_err(error)?
+        .map_err(error)
+    }
+
+    fn claim_item(
+        &self,
+        excluded: Vec<String>,
+        eligible_at_ms: i64,
+        eligible: impl Fn(&T) -> bool + Send + Sync + 'static,
+    ) -> Result<Option<ItemClaim<T>>, StoreError> {
+        let documents = self.storage()?.documents().clone();
+        let leases = Leases::new(&documents).with_clock(self.clock.clone());
+        let backend = Arc::clone(&self.backend);
+        let scope = self.scope.clone();
+        let collection = self.collection;
+        let holder = self.holder.clone();
+        let lease_ms = self.lease_ms;
+        let candidates = Self::all_documents(Arc::clone(&documents), collection);
+        self.run(async move {
+            let candidates = candidates.await?;
+            for candidate in candidates {
+                if excluded.iter().any(|id| id == &candidate.id)
+                    || candidate
+                        .doc
+                        .not_before_ms
+                        .is_some_and(|deadline| deadline > eligible_at_ms)
+                    || !eligible(&candidate.doc.item)
+                {
+                    continue;
+                }
+                let lease_key = format!("{collection}:{}", candidate.id);
+                let Some(lease) = leases
+                    .acquire("tinymemory.queue", &lease_key, &holder, lease_ms)
+                    .await?
+                else {
+                    continue;
+                };
+                let patch = json!({"claimed_epoch": lease.epoch});
+                let claimed = documents
+                    .claim(
+                        collection,
+                        &Filter::eq("_id", candidate.id.clone()),
+                        &[],
+                        &patch,
+                    )
+                    .await?;
+                let Some(claimed) = claimed else {
+                    let _ = leases
+                        .release("tinymemory.queue", &lease_key, &holder, lease.epoch)
+                        .await?;
+                    continue;
+                };
+                let stored: Stored<T> = serde_json::from_value(claimed.doc).map_err(|error| {
+                    StorageError::serialization(format!("queue item decode failed: {error}"))
+                })?;
+                return Ok(Some(ItemClaim {
+                    id: claimed.id,
+                    item: stored.item,
+                    version: claimed.version.0,
+                    epoch: lease.epoch,
+                    holder,
+                    lease_key,
+                }));
+            }
+            Ok(None)
+        })
+        .map_err(error)?
+        .map_err(error)
+    }
+
+    /// Claim the first stored item satisfying a caller's typed eligibility
+    /// rule. The predicate only filters the read candidates; item ownership
+    /// is still acquired through TSD leases and an atomic document claim.
+    pub fn claim_matching(
+        &self,
+        excluded: &[String],
+        eligible_at_ms: i64,
+        eligible: impl Fn(&T) -> bool + Send + Sync + 'static,
+    ) -> Result<Option<ItemClaim<T>>, StoreError> {
+        self.claim_item(excluded.to_vec(), eligible_at_ms, eligible)
+    }
+
+    fn finish_item(
+        &self,
+        claim: &ItemClaim<T>,
+        replacement: Option<(T, Option<i64>)>,
+    ) -> Result<bool, StoreError> {
+        let documents = self.storage()?.documents().clone();
+        let leases = Leases::new(&documents).with_clock(self.clock.clone());
+        let backend = Arc::clone(&self.backend);
+        let scope = self.scope.clone();
+        let holder = claim.holder.clone();
+        let lease_key = claim.lease_key.clone();
+        let id = claim.id.clone();
+        let epoch = claim.epoch;
+        let version = Version(claim.version);
+        let ttl = self.lease_ms;
+        let collection = self.collection;
+        let replacement = replacement.map(|(item, not_before_ms)| (item, not_before_ms));
+        self.run(async move {
+            let Some(lease) = leases
+                .renew("tinymemory.queue", &lease_key, &holder, epoch, ttl)
+                .await?
+            else {
+                return Ok(false);
+            };
+            let fenced = backend.for_scope_fenced(&scope, &lease.fence(&scope))?;
+            let documents = fenced.documents();
+            let result = match replacement {
+                Some((item, not_before_ms)) => {
+                    let Some(mut current) = documents.get_as::<Stored<T>>(collection, &id).await?
+                    else {
+                        return Ok(false);
+                    };
+                    if current.version != version {
+                        return Ok(false);
+                    }
+                    current.doc.item = item;
+                    current.doc.not_before_ms = not_before_ms;
+                    current.doc.claimed_epoch = epoch;
+                    documents
+                        .put_as(collection, &id, &current.doc, Precondition::Version(version))
+                        .await?;
+                    true
+                }
+                None => documents.delete(collection, &id, Precondition::Version(version)).await?,
+            };
+            let _ = leases
+                .release("tinymemory.queue", &lease_key, &holder, epoch)
+                .await?;
+            Ok(result)
+        })
+        .map_err(error)?
+        .map_err(error)
+    }
+}
+
+impl<T> ListStore<T> for DriverListStore<T>
+where
+    T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn load(&self) -> Result<Vec<T>, StoreError> {
+        let documents = self.storage()?.documents().clone();
+        let collection = self.collection;
+        self.run(async move {
+            Ok(Self::all_documents(documents, collection)
+                .await?
+                .into_iter()
+                .map(|row| row.doc.item)
+                .collect())
+        })
+        .map_err(error)?
+        .map_err(error)
+    }
+
+    fn save(&self, entries: &[T]) -> Result<(), StoreError> {
+        // Compatibility snapshot importer. Live consumers use append/claim/
+        // acknowledge/retry below and never replace the whole collection.
+        let mut used = Vec::with_capacity(entries.len());
+        for item in entries {
+            let id = (self.id_of)(item);
+            if used.iter().any(|known: &String| known == &id) {
+                return Err(StoreError("list item ids must be unique".into()));
+            }
+            used.push(id);
+        }
+        let existing = self.load()?;
+        let existing_ids: Vec<_> = existing.iter().map(|item| (self.id_of)(item)).collect();
+        for id in existing_ids {
+            if !used.contains(&id) {
+                let storage = self.storage()?;
+                let blocking = self.blocking.clone();
+                let collection = self.collection;
+                blocking
+                    .run(async move {
+                        let docs = storage.documents();
+                        if let Some(row) = docs.get(collection, &id).await? {
+                            docs.delete(collection, &id, Precondition::Version(row.version)).await?;
+                        }
+                        Ok::<_, StorageError>(())
+                    })
+                    .map_err(error)?
+                    .map_err(error)?;
+            }
+        }
+        for item in entries {
+            let id = (self.id_of)(item);
+            let _ = self.append_item(id, item.clone())?;
+        }
+        Ok(())
+    }
+
+    fn append(&self, id: &str, item: T) -> Result<bool, StoreError> {
+        self.append_item(id.to_owned(), item)
+    }
+
+    fn claim_oldest(
+        &self,
+        excluded: &[String],
+        eligible_at_ms: i64,
+    ) -> Result<Option<ItemClaim<T>>, StoreError> {
+        self.claim_item(excluded.to_vec(), eligible_at_ms, |_| true)
+    }
+
+    fn acknowledge(&self, claim: &ItemClaim<T>) -> Result<bool, StoreError> {
+        self.finish_item(claim, None)
+    }
+
+    fn retry(
+        &self,
+        claim: &ItemClaim<T>,
+        item: T,
+        not_before_ms: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        self.finish_item(claim, Some((item, not_before_ms)))
+    }
+
+    fn remove(&self, id: &str) -> Result<bool, StoreError> {
+        let storage = self.storage()?;
+        let blocking = self.blocking.clone();
+        let collection = self.collection;
+        let id = id.to_owned();
+        blocking
+            .run(async move {
+                let docs = storage.documents();
+                let Some(row) = docs.get(collection, &id).await? else {
+                    return Ok(false);
+                };
+                docs.delete(collection, &id, Precondition::Version(row.version)).await
+            })
+            .map_err(error)?
+            .map_err(error)
+    }
+}
+
+/// Convert a driver's version to its public numeric form when recording a
+/// caller-supplied import outcome.
+#[must_use]
+pub const fn document_version(version: Version) -> u64 {
+    version.0
+}

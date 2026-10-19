@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::background::BackgroundJob;
+use crate::list_store::ItemClaim;
 
 /// Most finished runs kept for the UI.
 pub const MAX_HISTORY: usize = 50;
@@ -73,6 +74,9 @@ pub enum QueueError {
     /// [`Selection::One`] named a job that is not queued.
     #[error("no queued job `{0}`")]
     NoSuchJob(String),
+    /// The storage port refused a claim or settlement.
+    #[error("job queue storage unavailable: {0}")]
+    StoreUnavailable(String),
 }
 
 /// Which jobs a run takes.
@@ -99,6 +103,74 @@ pub trait QueueStore: Send + Sync {
     /// # Errors
     /// A message the queue logs; it never aborts a run.
     fn save(&self, state: &QueueState) -> Result<(), String>;
+
+    /// Enqueue a single job. Driver-backed stores override this with an
+    /// insert into that job's document; the default preserves older local
+    /// stores.
+    fn enqueue_item(&self, job: QueuedJob) -> Result<bool, String> {
+        let mut state = self.load();
+        if state.pending.iter().any(|known| known.id == job.id) {
+            return Ok(false);
+        }
+        state.pending.push(job);
+        self.save(&state)?;
+        Ok(true)
+    }
+
+    /// Claim one matching job in FIFO order. `excluded` prevents one run call
+    /// from retrying a failed job repeatedly. Durable stores override this
+    /// with an atomic document claim and visibility lease.
+    fn claim_next(
+        &self,
+        selection: &Selection,
+        cutoff: chrono::DateTime<Utc>,
+        excluded: &[String],
+    ) -> Result<Option<(QueuedJob, ItemClaim<QueuedJob>)>, String> {
+        let state = self.load();
+        let Some(job) = state.pending.into_iter().find(|job| {
+            !excluded.iter().any(|id| id == &job.id)
+                && match selection {
+                    Selection::Due => job.queued_at <= cutoff,
+                    Selection::All => true,
+                    Selection::One(id) => &job.id == id,
+                }
+        }) else {
+            return Ok(None);
+        };
+        let token = ItemClaim {
+            id: job.id.clone(),
+            item: job.clone(),
+            version: 0,
+            epoch: 0,
+            holder: String::new(),
+            lease_key: String::new(),
+        };
+        Ok(Some((job, token)))
+    }
+
+    /// Settle one claimed job and add its history record. `replacement` keeps
+    /// a failed job queued; `None` acknowledges it. Durable stores perform
+    /// the job mutation and history insert through fenced item operations.
+    fn settle(
+        &self,
+        claim: &ItemClaim<QueuedJob>,
+        replacement: Option<QueuedJob>,
+        run: JobRun,
+    ) -> Result<bool, String> {
+        let mut state = self.load();
+        let Some(index) = state.pending.iter().position(|job| job.id == claim.id) else {
+            return Ok(false);
+        };
+        if let Some(replacement) = replacement {
+            state.pending[index] = replacement;
+        } else {
+            state.pending.remove(index);
+        }
+        state.history.insert(0, run);
+        state.history.truncate(MAX_HISTORY);
+        self.save(&state)?;
+        Ok(true)
+    }
 }
 
 /// A [`QueueStore`] that keeps the queue in memory.
