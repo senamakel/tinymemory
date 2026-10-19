@@ -38,8 +38,8 @@ pub use types::{
 /// A persisted, de-duplicating queue of [`BackgroundJob`]s.
 pub struct JobQueue<S: QueueStore> {
     store: S,
-    /// Serialises read-modify-writes. Held across a run, so two runs never
-    /// take the same job.
+    /// Serialises operations through this handle. Independent durable handles
+    /// coordinate claims through their storage provider.
     lock: Mutex<()>,
 }
 
@@ -85,12 +85,6 @@ impl<S: QueueStore> JobQueue<S> {
         }
     }
 
-    fn write(&self, state: &QueueState) {
-        if let Err(error) = self.store.save(state) {
-            log::warn!("[memory:jobs] writing the job queue failed: {error}");
-        }
-    }
-
     /// Queues `jobs` under `root`; a job already queued is kept once, at its
     /// first queue time.
     pub async fn enqueue(&self, root: &Namespace, jobs: Vec<BackgroundJob>) {
@@ -98,24 +92,18 @@ impl<S: QueueStore> JobQueue<S> {
             return;
         }
         let _guard = self.lock.lock().await;
-        let mut state = self.store.load();
         let root = root.to_string();
-        let mut added = 0;
         for job in jobs {
             let entry = queued(&root, job);
-            if state.pending.iter().any(|known| known.id == entry.id) {
-                continue;
+            match self.store.enqueue_item(entry.clone()) {
+                Ok(true) => log::debug!(
+                    "[memory:jobs] queued id={} job={} root={root}",
+                    entry.id,
+                    entry.job.name()
+                ),
+                Ok(false) => {}
+                Err(error) => log::warn!("[memory:jobs] queueing a job failed: {error}"),
             }
-            log::debug!(
-                "[memory:jobs] queued id={} job={} root={root}",
-                entry.id,
-                entry.job.name()
-            );
-            state.pending.push(entry);
-            added += 1;
-        }
-        if added > 0 {
-            self.write(&state);
         }
     }
 
@@ -148,22 +136,23 @@ impl<S: QueueStore> JobQueue<S> {
         build_delay_secs: u64,
     ) -> Result<Vec<JobRun>, QueueError> {
         let _guard = self.lock.lock().await;
-        let mut state = self.store.load();
         let cutoff = Utc::now() - Duration::seconds(i64::try_from(build_delay_secs).unwrap_or(0));
-        let (take, keep): (Vec<QueuedJob>, Vec<QueuedJob>) =
-            state.pending.drain(..).partition(|entry| match &selection {
-                Selection::Due => entry.queued_at <= cutoff,
-                Selection::All => true,
-                Selection::One(id) => &entry.id == id,
-            });
-        state.pending = keep;
-        if let Selection::One(id) = &selection
-            && take.is_empty()
-        {
-            return Err(QueueError::NoSuchJob(id.clone()));
-        }
         let mut runs = Vec::new();
-        for mut entry in take {
+        let mut excluded = Vec::new();
+        loop {
+            let claimed = self
+                .store
+                .claim_next(&selection, cutoff, &excluded)
+                .map_err(QueueError::StoreUnavailable)?;
+            let Some((mut entry, claim)) = claimed else {
+                if runs.is_empty()
+                    && let Selection::One(id) = &selection
+                {
+                    return Err(QueueError::NoSuchJob(id.clone()));
+                }
+                break;
+            };
+            excluded.push(entry.id.clone());
             let layout = entry
                 .root
                 .parse::<Namespace>()
@@ -182,6 +171,7 @@ impl<S: QueueStore> JobQueue<S> {
                 built: None,
                 stored: 0,
             };
+            let mut follow_ups = Vec::new();
             match runner.run(entry.job.clone()).await {
                 Ok(report) => {
                     record.outcome = match &report.outcome {
@@ -199,12 +189,7 @@ impl<S: QueueStore> JobQueue<S> {
                         .as_ref()
                         .and_then(|receipt| receipt.built);
                     record.stored = report.stored.len();
-                    for follow_up in report.follow_ups {
-                        let next = queued(&entry.root, follow_up);
-                        if !state.pending.iter().any(|known| known.id == next.id) {
-                            state.pending.push(next);
-                        }
-                    }
+                    follow_ups = report.follow_ups;
                     log::info!(
                         "[memory:jobs] ran id={} job={name} outcome={} built={:?}",
                         entry.id,
@@ -230,7 +215,6 @@ impl<S: QueueStore> JobQueue<S> {
                     );
                     if entry.attempts < MAX_ATTEMPTS {
                         record.reason = Some(error.to_string());
-                        state.pending.push(entry);
                     } else {
                         record.reason = Some(format!(
                             "dropped after {MAX_ATTEMPTS} failed attempts: {error}"
@@ -238,14 +222,37 @@ impl<S: QueueStore> JobQueue<S> {
                     }
                 }
             }
+            let replacement = if record.outcome == "failed" && entry.attempts < MAX_ATTEMPTS {
+                Some(entry.clone())
+            } else {
+                None
+            };
+            let settled = self
+                .store
+                .settle(
+                    &claim,
+                    replacement,
+                    record.clone(),
+                    if record.outcome == "failed" {
+                        Vec::new()
+                    } else {
+                        follow_ups
+                            .into_iter()
+                            .map(|job| queued(&entry.root, job))
+                            .collect()
+                    },
+                )
+                .map_err(QueueError::StoreUnavailable)?;
+            if !settled {
+                return Err(QueueError::StoreUnavailable(
+                    "the claimed job changed before settlement".into(),
+                ));
+            }
             runs.push(record);
+            if matches!(selection, Selection::One(_)) {
+                break;
+            }
         }
-        let mut history = runs.clone();
-        history.reverse();
-        history.append(&mut state.history);
-        history.truncate(MAX_HISTORY);
-        state.history = history;
-        self.write(&state);
         Ok(runs)
     }
 }

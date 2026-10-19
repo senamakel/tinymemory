@@ -33,11 +33,19 @@ async-trait = "0.1"
 
 # A queued job's id is a digest of the job and its root.
 sha2 = "0.11"
+# Storage-mode queues use only TinyStorageDrivers' public ports. Hosts supply
+# their already-open backend; this crate never selects a database driver.
+tinystoragedrivers-core = { git = "https://github.com/tinyhumansai/tinystoragedrivers", rev = "141fd9ed0ad5d14a8fb5a1b3e837a719e81ac08d", default-features = false, features = ["blocking"], optional = true }
+
+[features]
+default = []
+# Driver-backed, per-item durable queue adapters.
+storage = ["dep:tinystoragedrivers-core"]
 
 [dev-dependencies]
 # Every tool and the context compiler run against the reference engine.
 tinymemory-api = { path = "../tinymemory-api", features = ["conformance"] }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

@@ -289,7 +289,7 @@ unless configured**, so a plain `cargo test` never needs Docker.
 | `TINYMEMORY_TEST_CORTEX_KEY` | both | the bearer; defaults to `tinymemory-cortex-test`, the harness's key |
 | `TINYMEMORY_LIVE_TINYHUMANS_URL` | `live_cortexdb.rs` | base URL of the TinyHumans backend; adds a hosted (`tinyhumans` wire) pass to both tests. Billed to the token's account |
 | `TINYMEMORY_TEST_TINYHUMANS_TOKEN` | `live_cortexdb.rs` | session JWT or `tiny_live_` key for a test account; required with the URL. Pass it through the environment, never a file |
-| `CORTEXDB_VERSION` | `scripts/cortexdb-live.sh` | server release to boot (default `v0.10.4`; `v0.9.9` checks the older one) |
+| `CORTEXDB_IMAGE` | `scripts/cortexdb-live.sh` | image to boot (default is the official v0.8.21 image pinned by manifest digest; set `cortexdb/cortexdb:v0.8.20` to check the previous release) |
 | `CORTEXDB_PORT` | the script and compose file | published port (script default 3142; compose default 3141) |
 | `KEEP` | the script | leave the server running afterwards |
 

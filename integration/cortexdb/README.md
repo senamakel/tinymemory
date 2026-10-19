@@ -8,7 +8,7 @@ against the server and not only against the HTTP doubles in
 ```sh
 ./scripts/cortexdb-live.sh                          # boot, test, tear down
 KEEP=1 ./scripts/cortexdb-live.sh                   # leave it running on :3142
-CORTEXDB_VERSION=v0.9.9 ./scripts/cortexdb-live.sh  # an older server release
+CORTEXDB_IMAGE=cortexdb/cortexdb:v0.8.20 ./scripts/cortexdb-live.sh  # an older server release
 ```
 
 Or by hand:
@@ -31,8 +31,9 @@ server you started by hand (which uses the compose file's own project on
 
 ## What runs
 
-- `cortex`: `cortexdb/cortexdb` pinned to `v0.10.4` (override with
-  `CORTEXDB_VERSION`), listening on `127.0.0.1:3141` (`CORTEXDB_PORT`) with the
+- `cortex`: the official `cortexdb/cortexdb` v0.8.21 image, pinned by its
+  multi-platform manifest digest in Compose (override with `CORTEXDB_IMAGE`),
+  listening on `127.0.0.1:3141` (`CORTEXDB_PORT`) with the
   static bearer `tinymemory-cortex-test` (`TINYMEMORY_TEST_CORTEX_KEY`).
 - `mock-inference`: a deterministic OpenAI-compatible double
   (`mock_inference.py`) for CortexDB's embeddings, extraction and answer

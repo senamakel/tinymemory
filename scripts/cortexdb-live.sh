@@ -5,7 +5,7 @@
 #
 #   ./scripts/cortexdb-live.sh            # boot, test, tear down
 #   KEEP=1 ./scripts/cortexdb-live.sh     # leave the server running after
-#   CORTEXDB_VERSION=v0.10.4 ./scripts/cortexdb-live.sh
+#   CORTEXDB_IMAGE=cortexdb/cortexdb:v0.8.20 ./scripts/cortexdb-live.sh
 
 set -euo pipefail
 

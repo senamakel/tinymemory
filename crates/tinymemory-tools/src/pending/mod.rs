@@ -95,16 +95,6 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
         Ok(entries)
     }
 
-    fn write(&self, entries: &[Entry]) -> Result<(), PendingError> {
-        let bytes = serde_json::to_vec(entries).map_err(|_| PendingError::Unavailable)?;
-        if bytes.len() > self.limits.max_bytes {
-            return Err(PendingError::Unavailable);
-        }
-        self.store
-            .save(entries)
-            .map_err(|StoreError(_)| PendingError::Unavailable)
-    }
-
     /// Makes `operation` durable. The acknowledgement means only that it is
     /// in the local outbox, not accepted by the engine.
     ///
@@ -145,7 +135,15 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
             operation,
             status: None,
         });
-        self.write(&entries)?;
+        let bytes = serde_json::to_vec(&entries).map_err(|_| PendingError::Unavailable)?;
+        if bytes.len() > self.limits.max_bytes {
+            return Err(PendingError::Unavailable);
+        }
+        let entry = entries.last().cloned().ok_or(PendingError::Unavailable)?;
+        let ticket = entry.ticket.clone();
+        self.store
+            .append(&ticket, entry)
+            .map_err(|StoreError(_)| PendingError::Unavailable)?;
         Ok(ack)
     }
 
@@ -173,38 +171,15 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
     /// [`PendingError::Unavailable`] when the store cannot be read or written.
     pub fn clear_stale(&self, process: &str, generation: u64) -> Result<usize, PendingError> {
         let _guard = self.locked();
-        let mut entries = self.read()?;
-        let before = entries.len();
-        entries.retain(|entry| {
-            !entry
-                .epoch
-                .as_ref()
-                .is_none_or(|epoch| epoch.process != process || epoch.generation < generation)
-        });
-        let removed = before - entries.len();
-        if removed > 0 {
-            self.write(&entries)?;
-        }
-        Ok(removed)
-    }
-
-    /// Settles the head write: removed on `None`, kept with `status` on
-    /// `Some`. `false` when the head is no longer `ticket`.
-    fn settle(&self, ticket: &str, status: Option<String>) -> bool {
-        let _guard = self.locked();
-        let Ok(mut entries) = self.read() else {
-            return false;
-        };
-        if entries.first().is_none_or(|first| first.ticket != ticket) {
-            return false;
-        }
-        match status {
-            Some(code) => entries[0].status = Some(code),
-            None => {
-                entries.remove(0);
-            }
-        }
-        self.write(&entries).is_ok()
+        self.read()?;
+        self.store
+            .remove_matching(&|entry| {
+                entry
+                    .epoch
+                    .as_ref()
+                    .is_none_or(|epoch| epoch.process != process || epoch.generation < generation)
+            })
+            .map_err(|StoreError(_)| PendingError::Unavailable)
     }
 
     /// Runs queued writes oldest first through `executor`, settling each that
@@ -229,25 +204,29 @@ impl<S: ListStore<Entry>> PendingWrites<S> {
             if gate.generation() != generation {
                 break;
             }
-            let head = {
-                let _guard = self.locked();
-                self.read()
-                    .ok()
-                    .and_then(|entries| entries.into_iter().next())
-            };
-            let Some(entry) = head else { break };
+            let claim =
+                self.store
+                    .claim_oldest(&[], chrono::Utc::now().timestamp_millis(), &|entry| {
+                        entry.ticket.clone()
+                    });
+            let Ok(Some(claim)) = claim else { break };
+            let entry = claim.item.clone();
             if gate.generation() != generation || !accepts(&entry) {
+                let _ = self.store.retry(&claim, entry, None);
                 break;
             }
             let status = executor.run(&entry.operation).await.err();
-            let saved = self.settle(&entry.ticket, status.clone());
             if let Some(code) = status {
+                let mut retained = entry.clone();
+                retained.status = Some(code.clone());
+                let _ = self.store.retry(&claim, retained, None);
                 log::debug!(
                     "[tinymemory:pending] write retained code={code} ticket={}",
                     entry.ticket
                 );
                 break;
             }
+            let saved = self.store.acknowledge(&claim).unwrap_or(false);
             if !saved {
                 break;
             }
