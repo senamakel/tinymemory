@@ -349,9 +349,11 @@ These were measured against a live CortexDB by the v1 adapter. The doubles in
   it is not transient and not a credential fault. The typed variant lets a
   host show a top-up prompt without classifying message text. **A
   `*_PLAN_REQUIRED` code (`MEMORY_PLAN_REQUIRED`, sent as 403) is
-  `PlanRequired`**: it is a typed account-wide refusal, not transient or a
-  credential fault, so generic consumers stop retries and hosts can offer an
-  upgrade instead of signing the user in again. `is_plan_required` detects it.
+  `Unauthorized` with `is_plan_required() == true`**: it is an account-wide
+  refusal, not transient or a credential fault, so generic consumers stop
+  retries and hosts can offer an upgrade instead of signing the user in again.
+  This keeps the existing error variant source-compatible for downstream
+  exhaustive matches.
   Only a hosted 401 says the session expired; a plain 403 says the request was
   refused.
 - Reads (listings, recall) are retried 3 times with 250ms·2ⁿ backoff on
