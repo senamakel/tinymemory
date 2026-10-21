@@ -11,10 +11,6 @@ fn every_variant_renders_its_class_and_message() {
             Error::InsufficientCredits("top up".into()),
             "insufficient credits: top up",
         ),
-        (
-            Error::PlanRequired("upgrade the account".into()),
-            "plan required: upgrade the account",
-        ),
         (Error::InvalidRequest("x".into()), "invalid request: x"),
         (Error::Unauthorized("x".into()), "unauthorized: x"),
         (Error::NotFound("x".into()), "not found: x"),
@@ -53,11 +49,6 @@ fn errors_have_stable_host_codes_and_account_wide_classification() {
             "INSUFFICIENT_CREDITS",
             true,
         ),
-        (
-            Error::PlanRequired("upgrade the account".into()),
-            "PLAN_REQUIRED",
-            true,
-        ),
         (Error::Unavailable("offline".into()), "UNAVAILABLE", false),
         (Error::Engine("broken".into()), "ENGINE", false),
         (Error::Conflict("changed".into()), "ENGINE", false),
@@ -67,6 +58,21 @@ fn errors_have_stable_host_codes_and_account_wide_classification() {
         assert_eq!(error.code(), code);
         assert_eq!(error.is_account_wide(), account_wide, "{error:?}");
     }
+}
+
+#[test]
+fn hosted_plan_refusal_uses_the_existing_unauthorized_variant() {
+    let plan = Error::Unauthorized(
+        "[MEMORY_PLAN_REQUIRED] memory is not included in this account's plan".into(),
+    );
+    assert_eq!(plan.code(), "PLAN_REQUIRED");
+    assert!(plan.is_account_wide());
+    assert!(plan.is_plan_required());
+
+    let credential = Error::Unauthorized("[UNAUTHORIZED] session expired".into());
+    assert_eq!(credential.code(), "UNAUTHORIZED");
+    assert!(credential.is_account_wide());
+    assert!(!credential.is_plan_required());
 }
 
 #[test]

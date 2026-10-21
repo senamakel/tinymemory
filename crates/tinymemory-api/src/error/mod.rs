@@ -3,7 +3,10 @@
 //! Variants classify a failure by what a host can do about it, not by where it
 //! happened. Messages are lowercase, carry no trailing punctuation, and never
 //! carry a credential: an engine sanitises its own failure before it becomes
-//! [`Error::Engine`] or one of the typed account-wide variants.
+//! [`Error::Engine`] or one of the typed account-wide variants. A hosted plan
+//! refusal remains [`Error::Unauthorized`] for source compatibility with
+//! exhaustive matches; [`Error::is_plan_required`] distinguishes it from a
+//! credential rejection.
 
 use serde::Serialize;
 
@@ -28,9 +31,6 @@ pub enum Error {
     /// The hosted account cannot make this request until it has more credits.
     #[error("insufficient credits: {0}")]
     InsufficientCredits(String),
-    /// The hosted account's plan does not include the requested feature.
-    #[error("plan required: {0}")]
-    PlanRequired(String),
     /// The addressed item or route does not exist.
     #[error("not found: {0}")]
     NotFound(String),
@@ -58,9 +58,9 @@ impl Error {
             Self::Off(_) => "MEMORY_OFF",
             Self::Unsupported(_) => "UNSUPPORTED",
             Self::InvalidRequest(_) | Self::NotFound(_) | Self::Config(_) => "INVALID_REQUEST",
+            Self::Unauthorized(_) if self.is_plan_required() => "PLAN_REQUIRED",
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::InsufficientCredits(_) => "INSUFFICIENT_CREDITS",
-            Self::PlanRequired(_) => "PLAN_REQUIRED",
             Self::Unavailable(_) => "UNAVAILABLE",
             Self::Conflict(_) | Self::Engine(_) => "ENGINE",
         }
@@ -76,8 +76,15 @@ impl Error {
             Self::Off(_)
                 | Self::Unauthorized(_)
                 | Self::InsufficientCredits(_)
-                | Self::PlanRequired(_)
         )
+    }
+
+    /// Whether a hosted authorization response refused a feature outside the
+    /// account's plan. The error remains [`Self::Unauthorized`] so this
+    /// classification does not break downstream exhaustive matches.
+    #[must_use]
+    pub fn is_plan_required(&self) -> bool {
+        matches!(self, Self::Unauthorized(message) if hosted_error_code(message).is_some_and(|code| code.ends_with("_PLAN_REQUIRED")))
     }
 
     /// Whether retrying the same call later may succeed.
@@ -85,6 +92,16 @@ impl Error {
     pub fn is_transient(&self) -> bool {
         matches!(self, Self::Unavailable(_))
     }
+}
+
+fn hosted_error_code(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix('[')?;
+    let (code, _) = rest.split_once("] ")?;
+    (!code.is_empty()
+        && code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+    .then_some(code)
 }
 
 /// The crate-wide result alias.
