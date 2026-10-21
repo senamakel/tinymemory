@@ -145,6 +145,7 @@ identifies failures that apply to every request on the account.
 | `InvalidRequest(String)` | `invalid request:` | The request is malformed: a blank query, zero limit, empty forget target, unresolved document URI, bad namespace, out-of-range confidence, unknown cursor. | yes (every `validate`) |
 | `Unauthorized(String)` | `unauthorized:` | The credential was missing, expired or rejected. | no, engines |
 | `InsufficientCredits(String)` | `insufficient credits:` | The hosted account cannot make requests until its balance is topped up. | no, hosted engine |
+| `PlanRequired(String)` | `plan required:` | The hosted account's plan does not include the requested memory feature. | no, hosted engine |
 | `NotFound(String)` | `not found:` | The addressed item or route does not exist. | no, engines |
 | `Conflict(String)` | `conflict:` | The write conflicts with what the engine holds. | no, engines |
 | `Unavailable(String)` | `unavailable:` | Transient (timeout, rate limit, unavailable upstream); the same call may succeed later. | no, engines |
@@ -155,10 +156,13 @@ identifies failures that apply to every request on the account.
 `get` of an unknown id is **not** an error: the id is left out of the result.
 
 Stable `code()` values are `MEMORY_OFF`, `UNSUPPORTED`, `INVALID_REQUEST`,
-`UNAUTHORIZED`, `INSUFFICIENT_CREDITS`, `UNAVAILABLE`, and `ENGINE`. `Off`,
-`Unauthorized`, and `InsufficientCredits` are account-wide. `Unavailable` is
-transient, but its generic request-level error carries no proof of an
-account-wide outage.
+`UNAUTHORIZED`, `INSUFFICIENT_CREDITS`, `PLAN_REQUIRED`, `UNAVAILABLE`, and
+`ENGINE`. `Off`, `Unauthorized`, `InsufficientCredits`, and `PlanRequired` are
+account-wide. `Unavailable` is transient, but its generic request-level error
+carries no proof of an account-wide outage.
+
+`Error` is public and exhaustive. Adding a variant breaks downstream exhaustive
+matches; a release that includes a new variant must use a major version bump.
 
 `Result<T>` is `std::result::Result<T, Error>`. The conformance feature has
 its own `conformance::Error` (`Check` and `Engine` variants) naming the check
