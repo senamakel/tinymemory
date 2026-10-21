@@ -22,6 +22,14 @@ has_forbidden_engine() {
   ' <<< "$1"
 }
 
+has_sqlite_reader() {
+  awk '
+    { name = $1; sub(/\r$/, "", name)
+      if (name == "rusqlite" || name == "libsqlite3-sys") found = 1 }
+    END { exit found ? 0 : 1 }
+  ' <<< "$1"
+}
+
 tree_has_root() {
   local expected="$1"
   awk -v expected="$expected" '
@@ -90,6 +98,13 @@ self_test() {
     :
   else
     fail "CRLF package-name self-test did not detect libsqlite3-sys"
+  fi
+  has_sqlite_reader $'rusqlite\r v0.40.0' || \
+    fail "SQLite positive-control self-test did not detect rusqlite"
+  has_sqlite_reader $'libsqlite3-sys\r v0.30.1' || \
+    fail "SQLite positive-control self-test did not detect libsqlite3-sys"
+  if has_sqlite_reader $'mongodb v3.0.0\nnot-rusqlite v1.0.0'; then
+    fail "SQLite positive-control self-test matched a different package"
   fi
   if has_forbidden_engine $'tinyredact\r v2.0.0\nmy-rusqlite v1.0.0'; then
     fail "anchored package-name self-test matched a benign package"
@@ -174,6 +189,8 @@ done
 legacy_tree="$(cargo tree --locked -p tinymemory-integrations --no-default-features \
   --features legacy-import --edges normal,build --prefix none)"
 [[ -n "$legacy_tree" ]] || fail "explicit legacy-import tree was empty"
-has_forbidden_engine "$legacy_tree" || \
+tree_has_root tinymemory-integrations "$legacy_tree" || \
+  fail "explicit legacy-import tree omitted its root package"
+has_sqlite_reader "$legacy_tree" || \
   fail "explicit legacy-import graph no longer contains its SQLite reader"
 echo "engine dependency check: explicit legacy-import retains SQLite"
