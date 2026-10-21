@@ -39,6 +39,11 @@ fn the_reader_and_converter_crates_are_reachable() {
         tinymemory_integrations::documents::language_for_path("src/main.rs"),
         Some("rust")
     );
-    let _ = std::any::type_name::<tinymemory_integrations::import::Checkpoint>();
     let _ = std::any::type_name::<tinymemory_integrations::sources::MemorySourceEntry>();
+}
+
+#[cfg(feature = "legacy-import")]
+#[test]
+fn the_legacy_importer_is_reachable_when_explicitly_enabled() {
+    let _ = std::any::type_name::<tinymemory_integrations::import::Checkpoint>();
 }
