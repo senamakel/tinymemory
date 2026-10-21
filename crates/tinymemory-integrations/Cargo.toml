@@ -137,8 +137,10 @@ safety = ["dep:tinyredact", "dep:log", "dep:async-trait"]
 # `import`: reads a legacy v1 (embedded TinyCortex) workspace and migrates it
 # into any engine, resumably.
 legacy-import = ["dep:rusqlite", "dep:serde", "dep:serde_json", "dep:thiserror", "dep:async-trait", "dep:log"]
-# Every integration.
-full = ["cortex", "documents-office", "brain", "sources-network", "safety", "legacy-import"]
+# Every supported product integration. The one-time v1 importer is deliberately
+# opt-in: hosts that still need it enable `legacy-import` explicitly, keeping
+# SQLite out of the normal/full product dependency graph.
+full = ["cortex", "documents-office", "brain", "sources-network", "safety"]
 
 [[example]]
 name = "basic"

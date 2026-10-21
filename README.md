@@ -68,7 +68,12 @@ else on request, so a host pays only for what it uses.
 | `sources-network` | `sources::fetch` and the network readers | GitHub, RSS and web-page readers and `fetch_url`, behind the SSRF guard (implies `sources`) |
 | `safety` | `safety` | Secret and PII scrubbing plus `ScrubbingEngine` and `TimedEngine` |
 | `legacy-import` | `import` | Migrating a v1 (embedded TinyCortex) workspace into any engine |
-| `full` | all of the above | `cortex`, `documents-office`, `brain`, `sources-network`, `safety`, `legacy-import` |
+| `full` | all product integrations | `cortex`, `documents-office`, `brain`, `sources-network`, `safety` |
+
+`legacy-import` is intentionally excluded from `full`: it reads old v1
+workspaces from SQLite and is enabled separately by hosts that still perform
+that one-time migration. This keeps SQLite out of the product integration
+graph while preserving the importer as an explicit feature.
 
 Dependency weight per feature is tabulated in
 [`crates/tinymemory-integrations/README.md`](crates/tinymemory-integrations/README.md).

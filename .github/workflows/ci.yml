@@ -68,6 +68,9 @@ jobs:
             exit 1
           fi
 
+      - name: Check SQLite stays opt-in to legacy imports
+        run: bash scripts/check-engine-deps.sh
+
   feature-matrix:
     name: Feature powerset and coverage
     runs-on: ubuntu-latest
