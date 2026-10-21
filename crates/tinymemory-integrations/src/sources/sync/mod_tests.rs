@@ -305,6 +305,7 @@ async fn an_account_wide_refusal_stops_without_retrying_item_by_item() {
         Error::Off("disabled".into()),
         Error::Unauthorized("rejected".into()),
         Error::InsufficientCredits("top up".into()),
+        Error::PlanRequired("not entitled".into()),
     ] {
         let mut engine = Scripted::new();
         engine.account = Some(error);

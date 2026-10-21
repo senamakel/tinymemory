@@ -22,17 +22,19 @@ fn hosted_credit_errors_are_typed_and_keep_the_backend_code() {
 }
 
 #[test]
-fn plan_required_needs_the_engine_variant_and_a_plan_code() {
-    assert!(is_plan_required(&Error::Engine(
-        "[MEMORY_PLAN_REQUIRED] not in the plan".into()
-    )));
+fn hosted_plan_refusal_is_a_typed_account_wide_error() {
+    let error = Error::PlanRequired("[MEMORY_PLAN_REQUIRED] not in the plan".into());
+    assert!(is_plan_required(&error));
+    assert!(error.is_account_wide());
+    assert_eq!(error.code(), "PLAN_REQUIRED");
+    assert_eq!(error_code(&error), Some("MEMORY_PLAN_REQUIRED"));
     assert!(!is_plan_required(&Error::Unauthorized(
         "[MEMORY_PLAN_REQUIRED] not in the plan".into()
     )));
     assert!(!is_plan_required(&Error::Engine(
         "[USER_INSUFFICIENT_CREDITS] top up".into()
     )));
-    assert!(!is_plan_required(&Error::Engine(
+    assert!(!is_plan_required(&Error::PlanRequired(
         "MEMORY_PLAN_REQUIRED without the prefix".into()
     )));
 }

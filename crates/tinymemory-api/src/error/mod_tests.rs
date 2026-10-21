@@ -11,6 +11,10 @@ fn every_variant_renders_its_class_and_message() {
             Error::InsufficientCredits("top up".into()),
             "insufficient credits: top up",
         ),
+        (
+            Error::PlanRequired("upgrade the account".into()),
+            "plan required: upgrade the account",
+        ),
         (Error::InvalidRequest("x".into()), "invalid request: x"),
         (Error::Unauthorized("x".into()), "unauthorized: x"),
         (Error::NotFound("x".into()), "not found: x"),
@@ -47,6 +51,11 @@ fn errors_have_stable_host_codes_and_account_wide_classification() {
         (
             Error::InsufficientCredits("top up".into()),
             "INSUFFICIENT_CREDITS",
+            true,
+        ),
+        (
+            Error::PlanRequired("upgrade the account".into()),
+            "PLAN_REQUIRED",
             true,
         ),
         (Error::Unavailable("offline".into()), "UNAVAILABLE", false),
