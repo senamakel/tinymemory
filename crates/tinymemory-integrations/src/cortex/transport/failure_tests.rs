@@ -295,7 +295,7 @@ fn an_unusable_error_code_falls_back_to_the_other_key() {
 fn only_a_hosted_401_says_the_session_expired() {
     let body = r#"{"success":false,"error":"memory is not included in this account's plan","errorCode":"MEMORY_PLAN_REQUIRED"}"#;
     let plan = hosted_status_error("api.example", "memory/scopes", StatusCode::FORBIDDEN, body);
-    assert!(matches!(plan, Error::Engine(_)), "{plan:?}");
+    assert!(matches!(plan, Error::PlanRequired(_)), "{plan:?}");
     assert!(is_plan_required(&plan));
     assert_eq!(error_code(&plan), Some("MEMORY_PLAN_REQUIRED"));
     assert!(

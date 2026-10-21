@@ -13,7 +13,7 @@
 //! | --- | --- |
 //! | 401, 403 | [`Error::Unauthorized`] |
 //! | 402 | [`Error::InsufficientCredits`] when the hosted code names exhausted credits |
-//! | any, hosted, code `*_PLAN_REQUIRED` | [`Error::Engine`] ([`is_plan_required`]) |
+//! | any, hosted, code `*_PLAN_REQUIRED` | [`Error::PlanRequired`] ([`is_plan_required`]) |
 //! | 404 | [`Error::NotFound`] |
 //! | 400, 413, 422 | [`Error::InvalidRequest`] |
 //! | 409 | [`Error::Conflict`] |
@@ -33,12 +33,13 @@
 //! means; the hosted transport maps its structured backend code to
 //! [`Error::InsufficientCredits`] so a host can show a top-up prompt.
 //!
-//! **Why a plan refusal is `Engine`.** The hosted backend answers `403` with
+//! **Why a plan refusal has a dedicated variant.** The hosted backend answers `403` with
 //! a `*_PLAN_REQUIRED` code (`MEMORY_PLAN_REQUIRED`) when the account's plan
 //! does not include the feature. The credential is fine, so `Unauthorized`
 //! would sign a valid user out (tinyhumansai/openhuman#8081); like a 402 it
-//! is the engine refusing to serve, and [`is_plan_required`] lets a host show
-//! an upgrade path. A hosted `403` without such a code stays `Unauthorized`
+//! is a typed account-wide refusal, and [`is_plan_required`] lets a host show
+//! an upgrade path without retrying operations that cannot succeed. A hosted
+//! `403` without such a code stays `Unauthorized`
 //! but says the request was refused, not that the session expired, which
 //! only a `401` says.
 //!
@@ -72,6 +73,7 @@ fn message_of(error: &Error) -> &str {
         | Error::InvalidRequest(m)
         | Error::Unauthorized(m)
         | Error::InsufficientCredits(m)
+        | Error::PlanRequired(m)
         | Error::NotFound(m)
         | Error::Conflict(m)
         | Error::Unavailable(m)
@@ -101,8 +103,7 @@ pub fn error_code(error: &Error) -> Option<&str> {
 /// and shows an upgrade path.
 #[must_use]
 pub fn is_plan_required(error: &Error) -> bool {
-    matches!(error, Error::Engine(_))
-        && error_code(error).is_some_and(|code| code.ends_with(PLAN_REQUIRED_SUFFIX))
+    matches!(error, Error::PlanRequired(_))
 }
 
 #[cfg(test)]

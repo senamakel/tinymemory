@@ -204,15 +204,15 @@ pub(crate) fn hosted_status_error(
         || body.to_string(),
         |e| e.as_str().map_or_else(|| e.to_string(), str::to_string),
     );
-    // A plan refusal is no credential fault: `Engine`, like a 402, so a host
-    // shows an upgrade path instead of its sign-in flow
+    // A plan refusal is a typed account-wide error, so generic consumers can
+    // stop retries and a host can show an upgrade path instead of sign-in
     // (tinyhumansai/openhuman#8081).
     if code.ends_with(PLAN_REQUIRED_SUFFIX) {
         let head = format!(
             "[{code}] memory API {label} on {host}: memory is not included in this account's \
              plan (HTTP {status})"
         );
-        return Error::Engine(with_detail(head, &excerpt(&message)));
+        return Error::PlanRequired(with_detail(head, &excerpt(&message)));
     }
     let head = match status.as_u16() {
         401 => format!(

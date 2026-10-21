@@ -213,6 +213,7 @@ impl TurnPack {
             Error::InsufficientCredits(_) => {
                 "the account is out of credits; topping up restores it"
             }
+            Error::PlanRequired(_) => "this memory feature is not included in the account's plan",
             Error::Unavailable(_) => "the memory engine could not be reached",
             _ => return None,
         };

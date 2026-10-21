@@ -28,6 +28,9 @@ pub enum Error {
     /// The hosted account cannot make this request until it has more credits.
     #[error("insufficient credits: {0}")]
     InsufficientCredits(String),
+    /// The hosted account's plan does not include the requested feature.
+    #[error("plan required: {0}")]
+    PlanRequired(String),
     /// The addressed item or route does not exist.
     #[error("not found: {0}")]
     NotFound(String),
@@ -57,6 +60,7 @@ impl Error {
             Self::InvalidRequest(_) | Self::NotFound(_) | Self::Config(_) => "INVALID_REQUEST",
             Self::Unauthorized(_) => "UNAUTHORIZED",
             Self::InsufficientCredits(_) => "INSUFFICIENT_CREDITS",
+            Self::PlanRequired(_) => "PLAN_REQUIRED",
             Self::Unavailable(_) => "UNAVAILABLE",
             Self::Conflict(_) | Self::Engine(_) => "ENGINE",
         }
@@ -69,7 +73,10 @@ impl Error {
     pub fn is_account_wide(&self) -> bool {
         matches!(
             self,
-            Self::Off(_) | Self::Unauthorized(_) | Self::InsufficientCredits(_)
+            Self::Off(_)
+                | Self::Unauthorized(_)
+                | Self::InsufficientCredits(_)
+                | Self::PlanRequired(_)
         )
     }
 

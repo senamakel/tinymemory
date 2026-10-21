@@ -34,7 +34,7 @@ fn hosted_plan_refusal_is_a_typed_account_wide_error() {
     assert!(!is_plan_required(&Error::Engine(
         "[USER_INSUFFICIENT_CREDITS] top up".into()
     )));
-    assert!(!is_plan_required(&Error::PlanRequired(
-        "MEMORY_PLAN_REQUIRED without the prefix".into()
+    assert!(is_plan_required(&Error::PlanRequired(
+        "without the backend code prefix".into()
     )));
 }

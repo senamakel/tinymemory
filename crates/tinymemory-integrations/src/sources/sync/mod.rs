@@ -39,10 +39,6 @@ pub const MIN_SCHEDULE_MINS: u32 = 15;
 /// `ceil(N / 100)` instead of `N`.
 pub const STORE_CHUNK: usize = MAX_STORE_MANY;
 
-/// The suffix of the hosted engine's codes for a feature the account's plan
-/// does not include (`MEMORY_PLAN_REQUIRED`).
-const PLAN_REQUIRED_SUFFIX: &str = "_PLAN_REQUIRED";
-
 /// Why a sync failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SyncError {
@@ -64,19 +60,10 @@ impl SyncError {
     #[must_use]
     pub fn is_account_wide(&self) -> bool {
         match self {
-            Self::Engine(error) => error.is_account_wide() || is_plan_refusal(error),
+            Self::Engine(error) => error.is_account_wide(),
             _ => false,
         }
     }
-}
-
-/// Whether the hosted engine refused because the account's plan lacks the
-/// feature: an `Engine` error led by a `[*_PLAN_REQUIRED] ` code.
-fn is_plan_refusal(error: &tinymemory_api::Error) -> bool {
-    matches!(error, tinymemory_api::Error::Engine(message) if message
-        .strip_prefix('[')
-        .and_then(|rest| rest.split_once("] "))
-        .is_some_and(|(code, _)| code.ends_with(PLAN_REQUIRED_SUFFIX)))
 }
 
 /// A source as the host's registry holds it.
