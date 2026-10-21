@@ -618,7 +618,10 @@ async fn every_typed_account_wide_skip_reason_maps_to_its_stable_refusal_code() 
     for (error, code) in [
         (Error::Off("private detail".into()), "MEMORY_OFF"),
         (Error::Unauthorized("private detail".into()), "UNAUTHORIZED"),
-        (Error::PlanRequired("private detail".into()), "PLAN_REQUIRED"),
+        (
+            Error::PlanRequired("private detail".into()),
+            "PLAN_REQUIRED",
+        ),
         (
             Error::InsufficientCredits("private detail".into()),
             "INSUFFICIENT_CREDITS",
