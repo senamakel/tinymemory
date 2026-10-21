@@ -20,3 +20,19 @@ fn hosted_credit_errors_are_typed_and_keep_the_backend_code() {
     let credits = Error::InsufficientCredits(format!("[{INSUFFICIENT_CREDITS_CODE}] top up"));
     assert_eq!(error_code(&credits), Some(INSUFFICIENT_CREDITS_CODE));
 }
+
+#[test]
+fn plan_required_needs_the_engine_variant_and_a_plan_code() {
+    assert!(is_plan_required(&Error::Engine(
+        "[MEMORY_PLAN_REQUIRED] not in the plan".into()
+    )));
+    assert!(!is_plan_required(&Error::Unauthorized(
+        "[MEMORY_PLAN_REQUIRED] not in the plan".into()
+    )));
+    assert!(!is_plan_required(&Error::Engine(
+        "[USER_INSUFFICIENT_CREDITS] top up".into()
+    )));
+    assert!(!is_plan_required(&Error::Engine(
+        "MEMORY_PLAN_REQUIRED without the prefix".into()
+    )));
+}

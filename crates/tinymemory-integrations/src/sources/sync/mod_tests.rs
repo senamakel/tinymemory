@@ -169,6 +169,9 @@ fn account_wide_failures_are_told_from_item_failures() {
     assert!(wide(Error::Off("disabled".into())));
     assert!(wide(Error::Unauthorized("x".into())));
     assert!(wide(Error::InsufficientCredits("top up".into())));
+    assert!(wide(Error::Engine(
+        "[MEMORY_PLAN_REQUIRED] not in the plan".into()
+    )));
     assert!(!wide(Error::Unavailable("request timed out".into())));
     assert!(!wide(Error::Unavailable("rate limited".into())));
     assert!(!wide(Error::Engine("[OTHER] nope".into())));
