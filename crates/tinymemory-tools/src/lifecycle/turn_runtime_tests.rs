@@ -638,6 +638,9 @@ async fn every_typed_account_wide_skip_reason_maps_to_its_stable_refusal_code() 
             .expect("account-wide skipped reads should be distinguished");
         assert_eq!(pack.refusal, Some(code));
         assert!(!pack.markdown.contains("private detail"));
+        if code == "PLAN_REQUIRED" {
+            assert!(pack.markdown.contains("not included in the account's plan"));
+        }
     }
 }
 

@@ -3,7 +3,7 @@
 //! Variants classify a failure by what a host can do about it, not by where it
 //! happened. Messages are lowercase, carry no trailing punctuation, and never
 //! carry a credential: an engine sanitises its own failure before it becomes
-//! [`Error::Engine`].
+//! [`Error::Engine`] or one of the typed account-wide variants.
 
 use serde::Serialize;
 
