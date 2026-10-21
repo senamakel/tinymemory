@@ -169,7 +169,7 @@ fn account_wide_failures_are_told_from_item_failures() {
     assert!(wide(Error::Off("disabled".into())));
     assert!(wide(Error::Unauthorized("x".into())));
     assert!(wide(Error::InsufficientCredits("top up".into())));
-    assert!(wide(Error::PlanRequired(
+    assert!(wide(Error::Unauthorized(
         "[MEMORY_PLAN_REQUIRED] not in the plan".into()
     )));
     assert!(!wide(Error::Unavailable("request timed out".into())));
@@ -305,7 +305,7 @@ async fn an_account_wide_refusal_stops_without_retrying_item_by_item() {
         Error::Off("disabled".into()),
         Error::Unauthorized("rejected".into()),
         Error::InsufficientCredits("top up".into()),
-        Error::PlanRequired("not entitled".into()),
+        Error::Unauthorized("[MEMORY_PLAN_REQUIRED] not entitled".into()),
     ] {
         let mut engine = Scripted::new();
         engine.account = Some(error);

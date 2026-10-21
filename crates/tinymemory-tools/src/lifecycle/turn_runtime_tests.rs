@@ -619,7 +619,7 @@ async fn every_typed_account_wide_skip_reason_maps_to_its_stable_refusal_code() 
         (Error::Off("private detail".into()), "MEMORY_OFF"),
         (Error::Unauthorized("private detail".into()), "UNAUTHORIZED"),
         (
-            Error::PlanRequired("private detail".into()),
+            Error::Unauthorized("[MEMORY_PLAN_REQUIRED] private detail".into()),
             "PLAN_REQUIRED",
         ),
         (

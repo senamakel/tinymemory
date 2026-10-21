@@ -132,7 +132,7 @@ async fn plan_refusal_does_not_consume_a_jobs_attempts() {
     let queue = queue();
     queue.enqueue(&Namespace::ROOT, vec![build("a")]).await;
     let engine: Arc<dyn MemoryEngine> = Arc::new(RefusingEngine::with(
-        tinymemory_api::Error::PlanRequired("[MEMORY_PLAN_REQUIRED] upgrade".into()),
+        tinymemory_api::Error::Unauthorized("[MEMORY_PLAN_REQUIRED] upgrade".into()),
     ));
 
     for _ in 0..MAX_ATTEMPTS + 2 {
