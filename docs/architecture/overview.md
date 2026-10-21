@@ -61,7 +61,10 @@ alone, so the contract is the only coupling point.
 | | `sources-network` | GitHub, RSS and web-page readers behind the SSRF guard (implies `sources`) |
 | | `safety` | Secret and PII scrubbing of a `StoreItem` |
 | | `legacy-import` | Reading a v1 workspace; `import::migrate` and `migrate_with` |
-| | `full` | `cortex`, `documents-office`, `sources-network`, `safety`, `legacy-import` |
+| | `full` | `cortex`, `documents-office`, `sources-network`, `safety` |
+
+The one-time SQLite-backed `legacy-import` remains separately opt-in and is
+not part of `full`, keeping it out of the product dependency graph.
 
 ## Write path
 

@@ -23,8 +23,10 @@ wants one integration enables one feature and links nothing else.
 | `safety` | `safety` | Secret and PII scrubbing plus `ScrubbingEngine` and `TimedEngine` decorators | [`src/safety/README.md`](src/safety/README.md) |
 | `import` | `legacy-import` | Reads a v1 (embedded TinyCortex) workspace and migrates it into any engine, resumably | [`src/import/README.md`](src/import/README.md) |
 
-`cortex` implies `safety`, so every `EngineBinder` result is guarded. `full` turns on `cortex`, `documents-office`, `sources-network`, `safety` and
-`legacy-import`. Feature implications: `documents-office` implies `documents`;
+`cortex` implies `safety`, so every `EngineBinder` result is guarded. `full`
+turns on `cortex`, `documents-office`, `sources-network` and `safety`; it
+excludes the opt-in SQLite-backed `legacy-import`. Feature implications:
+`documents-office` implies `documents`;
 `sources` implies `documents`; `sources-network` implies `sources`; `schema`
 implies `sources`.
 
