@@ -535,8 +535,10 @@ fn cc_keyword_near(norm: &str, start: usize, end: usize) -> bool {
     CC_KEYWORD_RE.is_match(&norm[lo..hi])
 }
 
-// Sort by start asc, length desc. Then walk in order, dropping any hit whose
-// range overlaps a kept hit. Result: earlier + longer wins; no double-redact.
+// Sort by start asc, length desc. Then walk in order, merging any hit whose
+// range overlaps a kept hit into it. Result: earlier + longer keeps its token,
+// and a partial overlap's tail is still covered (fails closed); no
+// double-redact.
 fn dedupe_overlaps(hits: &mut Vec<Hit>) {
     hits.sort_by(|a, b| {
         a.start
@@ -545,9 +547,9 @@ fn dedupe_overlaps(hits: &mut Vec<Hit>) {
     });
     let mut kept: Vec<Hit> = Vec::with_capacity(hits.len());
     for h in hits.drain(..) {
-        let overlaps = kept.last().is_some_and(|k| h.start < k.end);
-        if !overlaps {
-            kept.push(h);
+        match kept.last_mut() {
+            Some(k) if h.start < k.end => k.end = k.end.max(h.end),
+            _ => kept.push(h),
         }
     }
     *hits = kept;

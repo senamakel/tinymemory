@@ -709,3 +709,22 @@ fn a_separated_digit_list_with_no_card_is_left_alone() {
         assert_eq!(redact_pii_with(input, policy).value, input, "{policy:?}");
     }
 }
+
+#[test]
+fn a_partial_overlap_keeps_its_tail_redacted() {
+    let mut hits = vec![
+        Hit {
+            start: 5,
+            end: 15,
+            token: PII_PHONE,
+        },
+        Hit {
+            start: 0,
+            end: 10,
+            token: PII_CC,
+        },
+    ];
+    dedupe_overlaps(&mut hits);
+    let ranges: Vec<_> = hits.iter().map(|h| (h.start, h.end, h.token)).collect();
+    assert_eq!(ranges, vec![(0, 15, PII_CC)]);
+}
