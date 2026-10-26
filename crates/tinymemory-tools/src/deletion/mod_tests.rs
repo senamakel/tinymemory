@@ -142,14 +142,16 @@ impl ListStore<PendingDeletion> for &Flaky {
     }
     fn save(&self, all: &[PendingDeletion]) -> Result<(), crate::list_store::StoreError> {
         let failing = &self.failing_saves;
-        if failing
+        // `fetch_update` is deprecated for `try_update` on newer toolchains, which is not stable on this crate's MSRV.
+        #[allow(deprecated)]
+        let taken = failing
             .fetch_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
                 |left| left.checked_sub(1),
             )
-            .is_ok()
-        {
+            .is_ok();
+        if taken {
             return Err(crate::list_store::StoreError("full".into()));
         }
         self.saves.lock().unwrap().push(all.to_vec());
