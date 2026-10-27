@@ -141,11 +141,13 @@ struct StaticResolver {
 struct DeferredResolver {
     memory: AgentMemory,
     release: Mutex<Option<oneshot::Receiver<()>>>,
+    calls: AtomicUsize,
 }
 
 #[async_trait]
 impl EngineResolver for DeferredResolver {
     async fn resolve(&self) -> Result<AgentMemory> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let release = self.release.lock().unwrap().take();
         if let Some(release) = release {
             let _ = release.await;
@@ -304,7 +306,7 @@ fn fixture_with_memory_and_advance(
     ));
     Fixture {
         hooks,
-        resolver,
+        resolver.clone(),
         clock,
         model,
         jobs,
@@ -320,6 +322,7 @@ async fn pre_turn_awaits_async_engine_resolution() {
     let resolver = Arc::new(DeferredResolver {
         memory: memory(engine),
         release: Mutex::new(Some(wait)),
+        calls: AtomicUsize::new(0),
     });
     let clock = FakeClock::at(Duration::ZERO);
     let citations = Arc::new(RecordingCitations::default());
@@ -340,9 +343,10 @@ async fn pre_turn_awaits_async_engine_resolution() {
         Poll::Ready(_) => panic!("pre-turn completed before async engine resolution"),
     })
     .await;
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     release.send(()).unwrap();
 
-    assert!(work.await.is_some());
+    let _ = work.await;
     assert_eq!(citations.calls.load(Ordering::SeqCst), 0);
 }
 
