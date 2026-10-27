@@ -7,7 +7,9 @@
 
 /// How a bare (no separators) Luhn-valid 13-19 digit run is judged as a credit
 /// card by the content scrubber. Separated runs (`4111 1111 1111 1111`) are
-/// always Luhn-gated only.
+/// always Luhn-gated only. A separated run that fails Luhn as a whole is
+/// retried on windows of its digit groups, and a card found that way must be
+/// corroborated under either setting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum BareCardGate {
     /// Redact every Luhn-valid run. The strictest behaviour and the default.

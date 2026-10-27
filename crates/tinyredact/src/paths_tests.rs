@@ -590,6 +590,28 @@ fn decomposed_unicode_username_marks_and_following_letters_are_scrubbed() {
     ]);
 }
 
+#[test]
+fn a_home_path_inside_a_uri_query_or_fragment_is_redacted() {
+    assert_home_path_cases(&[
+        (
+            "https://example.com/open?path=/Users/alice/secret.txt",
+            "https://example.com/open?path=<HOME>/secret.txt",
+        ),
+        (
+            "file:///tmp/x?ref=/home/alice/notes",
+            "file:///tmp/x?ref=<HOME>/notes",
+        ),
+        (
+            "(https://x.test/?f=/Users/alice/a)",
+            "(https://x.test/?f=<HOME>/a)",
+        ),
+        (
+            "https://x.test/doc#/home/alice/notes",
+            "https://x.test/doc#<HOME>/notes",
+        ),
+    ]);
+}
+
 fn assert_home_path_cases(cases: &[(&str, &str)]) {
     let mismatches = cases
         .iter()

@@ -7,6 +7,10 @@
 
 use serde::Serialize;
 
+/// The suffix of a hosted engine's codes for a feature the account's plan
+/// does not include (`MEMORY_PLAN_REQUIRED`).
+pub const PLAN_REQUIRED_SUFFIX: &str = "_PLAN_REQUIRED";
+
 /// Every way a memory operation can fail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
@@ -62,7 +66,8 @@ impl Error {
         }
     }
 
-    /// Whether the failure is known to affect every request on the account.
+    /// Whether the failure is known to affect every request on the account,
+    /// including a plan refusal ([`Self::is_plan_required`]).
     /// `Unavailable` is deliberately excluded: it describes a transient
     /// request failure and carries no typed proof of an account-wide outage.
     #[must_use]
@@ -70,7 +75,27 @@ impl Error {
         matches!(
             self,
             Self::Off(_) | Self::Unauthorized(_) | Self::InsufficientCredits(_)
-        )
+        ) || self.is_plan_required()
+    }
+
+    /// Whether the engine refused because the account's plan does not include
+    /// the feature: an [`Self::Engine`] message led by a well-formed
+    /// `[CODE] ` whose code ends in [`PLAN_REQUIRED_SUFFIX`]. Not a credential
+    /// fault, so a host keeps the session and shows an upgrade path.
+    #[must_use]
+    pub fn is_plan_required(&self) -> bool {
+        let Self::Engine(message) = self else {
+            return false;
+        };
+        message
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("] "))
+            .is_some_and(|(code, _)| {
+                code.ends_with(PLAN_REQUIRED_SUFFIX)
+                    && code
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            })
     }
 
     /// Whether retrying the same call later may succeed.

@@ -33,12 +33,16 @@ enum Mode {
     Credits,
     /// Refuses these legacy ids as invalid, taking the rest.
     Refuse(HashSet<String>),
+    /// Refuses every bulk store as invalid, so items go one at a time, and
+    /// is unavailable after this many single stores.
+    DownAfter(usize),
 }
 
 struct Scripted {
     inner: ReferenceEngine,
     mode: Mutex<Mode>,
     calls: AtomicUsize,
+    singles: AtomicUsize,
 }
 
 impl Scripted {
@@ -47,6 +51,7 @@ impl Scripted {
             inner: ReferenceEngine::new(),
             mode: Mutex::new(mode),
             calls: AtomicUsize::new(0),
+            singles: AtomicUsize::new(0),
         })
     }
 
@@ -70,6 +75,16 @@ impl Scripted {
                     Err(Error::InvalidRequest("too large".into()))
                 } else {
                     Ok(())
+                }
+            }
+            Mode::DownAfter(_) if items.len() > 1 => {
+                Err(Error::InvalidRequest("batch too large".into()))
+            }
+            Mode::DownAfter(limit) => {
+                if self.singles.fetch_add(1, Ordering::SeqCst) < limit {
+                    Ok(())
+                } else {
+                    Err(Error::Unavailable("engine down".into()))
                 }
             }
         }
@@ -523,4 +538,18 @@ fn the_persisted_file_keeps_its_wire_shape() {
     let old: ImportFile =
         serde_json::from_str(r#"{"state":{"phase":"done","imported":2,"total":2}}"#).unwrap();
     assert_eq!(old.state.phase, ImportPhase::Done);
+}
+
+#[tokio::test]
+async fn a_failure_in_the_one_by_one_fallback_checkpoints_the_last_stored_item() {
+    let dir = legacy();
+    let engine = Scripted::new(Mode::DownAfter(5));
+    let rig = rig(dir.path(), engine, true);
+    let file = import(&rig).await;
+    assert_eq!(file.state.imported, 5);
+    assert_eq!(
+        file.checkpoint.documents.as_deref(),
+        Some("d004"),
+        "the checkpoint must not pass an item that was never stored"
+    );
 }

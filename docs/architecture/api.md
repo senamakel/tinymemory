@@ -136,7 +136,9 @@ never carry a credential: an engine sanitises its own failure before it becomes
 `Error::Engine`. `Error` is `Clone + PartialEq + Eq` and serializes its variant
 and sanitized message so a caller can retain its category without parsing
 `Display` text. `Error::code()` returns the stable host code; `is_account_wide()`
-identifies failures that apply to every request on the account.
+identifies failures that apply to every request on the account, including a
+plan refusal: an `Engine` message led by a `[*_PLAN_REQUIRED] ` code, which
+`is_plan_required()` detects.
 
 | Variant | Display prefix | Used when | Raised by `tinymemory-api` itself? |
 | --- | --- | --- | --- |

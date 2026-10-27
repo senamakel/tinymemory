@@ -60,9 +60,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// The TinyHumans backend's code for an exhausted credit balance (HTTP 402).
 pub(crate) const INSUFFICIENT_CREDITS_CODE: &str = "USER_INSUFFICIENT_CREDITS";
 
-/// The suffix of the TinyHumans backend's codes for a feature the account's
-/// plan does not include (`MEMORY_PLAN_REQUIRED`).
-pub(crate) const PLAN_REQUIRED_SUFFIX: &str = "_PLAN_REQUIRED";
+pub(crate) use tinymemory_api::error::PLAN_REQUIRED_SUFFIX;
 
 /// The message every variant carries.
 fn message_of(error: &Error) -> &str {
@@ -101,8 +99,7 @@ pub fn error_code(error: &Error) -> Option<&str> {
 /// and shows an upgrade path.
 #[must_use]
 pub fn is_plan_required(error: &Error) -> bool {
-    matches!(error, Error::Engine(_))
-        && error_code(error).is_some_and(|code| code.ends_with(PLAN_REQUIRED_SUFFIX))
+    error.is_plan_required()
 }
 
 #[cfg(test)]

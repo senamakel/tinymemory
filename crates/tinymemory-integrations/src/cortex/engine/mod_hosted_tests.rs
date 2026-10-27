@@ -521,3 +521,44 @@ async fn a_visibility_timeout_says_whether_the_listing_was_rate_limited() {
         "{missing}"
     );
 }
+
+#[tokio::test]
+async fn a_forget_is_sent_in_batches_and_a_retry_that_finds_them_gone_succeeds() {
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::sync::Mutex;
+    let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let seen = bodies.clone();
+    // Each batch's first send fails transiently; its retry finds the
+    // events already gone (404), which is success for an idempotent removal.
+    let app = Router::new().route(
+        "/memory/forget",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen.clone();
+            async move {
+                let mut seen = seen.lock().unwrap();
+                seen.push(body);
+                if seen.len() % 2 == 1 {
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({})))
+                } else {
+                    (StatusCode::NOT_FOUND, Json(serde_json::json!({})))
+                }
+            }
+        }),
+    );
+    let engine = hosted_engine(&serve(app).await);
+    let ids: Vec<String> = (0..250).map(|i| format!("e{i}")).collect();
+    engine
+        .log
+        .forget_events("user:alice/app:learnings", &ids)
+        .await
+        .unwrap();
+    let sizes: Vec<usize> = bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| body["selector"]["memory_ids"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(sizes, vec![100, 100, 100, 100, 50, 50]);
+}

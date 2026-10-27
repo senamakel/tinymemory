@@ -215,6 +215,9 @@ impl TurnPack {
                 "the account is out of credits; topping up restores it"
             }
             Error::Unavailable(_) => "the memory engine could not be reached",
+            Error::Engine(_) if error.is_plan_required() => {
+                "the account's plan does not include memory; upgrading restores it"
+            }
             _ => return None,
         };
         let markdown = format!(

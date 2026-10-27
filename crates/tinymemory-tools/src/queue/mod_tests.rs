@@ -159,3 +159,22 @@ async fn history_keeps_the_newest_runs_only() {
     }
     assert_eq!(queue.snapshot().await.history.len(), MAX_HISTORY);
 }
+
+/// A hosted `*_PLAN_REQUIRED` refusal arrives as `Engine` and refuses every
+/// request on the account, so a job must keep its attempts while the account
+/// lacks the plan; otherwise every queued belief build is dropped after
+/// `MAX_ATTEMPTS` runs.
+#[tokio::test]
+async fn a_plan_refusal_never_uses_up_a_jobs_attempts() {
+    let queue = queue();
+    queue.enqueue(&Namespace::ROOT, vec![build("a")]).await;
+    let engine: Arc<dyn MemoryEngine> = Arc::new(RefusingEngine::with(
+        tinymemory_api::Error::Engine("[MEMORY_PLAN_REQUIRED] not in the plan".into()),
+    ));
+    for _ in 0..MAX_ATTEMPTS + 2 {
+        queue.run(engine.clone(), Selection::All, 0).await.unwrap();
+    }
+    let state = queue.snapshot().await;
+    assert_eq!(state.pending.len(), 1, "the job waits for the plan");
+    assert_eq!(state.pending[0].attempts, 0);
+}

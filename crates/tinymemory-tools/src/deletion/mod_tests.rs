@@ -122,24 +122,102 @@ fn backoff_doubles_and_is_capped() {
     assert_eq!(backoff.delay(50), Duration::minutes(10));
 }
 
-#[test]
-fn an_unreadable_store_is_treated_as_empty_without_clobbering() {
-    use crate::list_store::StoreError;
-    struct Broken;
-    impl ListStore<PendingDeletion> for Broken {
-        fn load(&self) -> Result<Vec<PendingDeletion>, StoreError> {
-            Err(StoreError("io".into()))
-        }
-        fn save(&self, _: &[PendingDeletion]) -> Result<(), StoreError> {
-            Ok(())
+/// A store whose reads fail until `readable` is set and whose next
+/// `failing_saves` saves fail, recording every save that succeeds.
+#[derive(Default)]
+struct Flaky {
+    readable: std::sync::atomic::AtomicBool,
+    failing_saves: std::sync::atomic::AtomicUsize,
+    stored: StdMutex<Vec<PendingDeletion>>,
+    saves: StdMutex<Vec<Vec<PendingDeletion>>>,
+}
+
+impl ListStore<PendingDeletion> for &Flaky {
+    fn load(&self) -> Result<Vec<PendingDeletion>, crate::list_store::StoreError> {
+        if self.readable.load(std::sync::atomic::Ordering::SeqCst) {
+            Ok(self.stored.lock().unwrap().clone())
+        } else {
+            Err(crate::list_store::StoreError("corrupt".into()))
         }
     }
-    let queue = DeletionQueue::new(Broken, Backoff::default());
-    assert!(queue.pending().is_empty());
+    fn save(&self, all: &[PendingDeletion]) -> Result<(), crate::list_store::StoreError> {
+        let failing = &self.failing_saves;
+        if failing
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(crate::list_store::StoreError("full".into()));
+        }
+        self.saves.lock().unwrap().push(all.to_vec());
+        *self.stored.lock().unwrap() = all.to_vec();
+        Ok(())
+    }
+}
+
+#[test]
+fn enqueue_on_an_unreadable_store_does_not_overwrite_it() {
+    let store = Flaky::default();
+    let queue = DeletionQueue::new(&store, Backoff::default());
+    queue.enqueue(thread("t2"));
+    assert!(
+        store.saves.lock().unwrap().is_empty(),
+        "an unreadable queue was overwritten with {:?}",
+        store.saves.lock().unwrap()
+    );
+    assert_eq!(
+        queue.pending(),
+        vec![thread("t2")],
+        "the new deletion was lost"
+    );
+}
+
+#[test]
+fn a_held_deletion_is_flushed_once_the_store_is_readable() {
+    let store = Flaky::default();
+    *store.stored.lock().unwrap() = vec![thread("t1")];
+    let queue = DeletionQueue::new(&store, Backoff::default());
+    queue.enqueue(thread("t2"));
+
+    store
+        .readable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(queue.pending(), vec![thread("t1"), thread("t2")]);
+    assert_eq!(
+        *store.stored.lock().unwrap(),
+        vec![thread("t1"), thread("t2")]
+    );
 }
 
 #[test]
 fn the_wire_shape_matches_the_legacy_file() {
     let json = serde_json::to_string(&thread("t")).unwrap();
     assert_eq!(json, r#"{"kind":"thread","thread_id":"t"}"#);
+}
+
+#[test]
+fn a_settled_deletion_is_not_restored_after_a_failed_save() {
+    let store = Flaky::default();
+    *store.stored.lock().unwrap() = vec![thread("a")];
+    let queue = DeletionQueue::new(&store, Backoff::default());
+    queue.enqueue(thread("b"));
+
+    // Settling `a` first fails to write the held `b` back, then saves `[b]`.
+    store
+        .readable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    store
+        .failing_saves
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    queue.settle(&thread("a"));
+
+    assert_eq!(
+        queue.pending(),
+        vec![thread("b")],
+        "the settled deletion came back"
+    );
+    assert_eq!(*store.stored.lock().unwrap(), vec![thread("b")]);
 }

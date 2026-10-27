@@ -68,3 +68,19 @@ fn request_timeouts_and_rate_limits_are_transient_not_account_wide() {
         assert!(!error.is_account_wide(), "{error:?}");
     }
 }
+
+#[test]
+fn a_plan_refusal_is_account_wide_only_with_a_well_formed_code() {
+    let plan = Error::Engine("[MEMORY_PLAN_REQUIRED] memory API recall: not in the plan".into());
+    assert!(plan.is_plan_required());
+    assert!(plan.is_account_wide());
+    for other in [
+        Error::Engine("saw [MEMORY_PLAN_REQUIRED] mid-message".into()),
+        Error::Engine("[not a code_PLAN_REQUIRED] memory API x".into()),
+        Error::Engine("[USER_INSUFFICIENT_CREDITS] top up".into()),
+        Error::Unavailable("[MEMORY_PLAN_REQUIRED] x".into()),
+    ] {
+        assert!(!other.is_plan_required(), "{other:?}");
+        assert!(!other.is_account_wide(), "{other:?}");
+    }
+}
