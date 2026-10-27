@@ -146,13 +146,15 @@ struct DeferredResolver {
 #[async_trait]
 impl EngineResolver for DeferredResolver {
     async fn resolve(&self) -> Result<AgentMemory> {
-        if let Some(release) = self.release.lock().unwrap().take() {
+        let release = self.release.lock().unwrap().take();
+        if let Some(release) = release {
             let _ = release.await;
         }
         Ok(self.memory.clone())
     }
 }
 
+#[async_trait]
 impl EngineResolver for StaticResolver {
     async fn resolve(&self) -> Result<AgentMemory> {
         self.calls.fetch_add(1, Ordering::SeqCst);
