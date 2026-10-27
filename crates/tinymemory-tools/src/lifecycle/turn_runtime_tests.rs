@@ -139,7 +139,7 @@ struct StaticResolver {
 }
 
 impl EngineResolver for StaticResolver {
-    fn resolve(&self) -> Result<AgentMemory> {
+    async fn resolve(&self) -> Result<AgentMemory> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.clock.advance_by(self.advance);
         if self.fail {
