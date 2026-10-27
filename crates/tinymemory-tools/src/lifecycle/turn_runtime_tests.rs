@@ -306,7 +306,7 @@ fn fixture_with_memory_and_advance(
     ));
     Fixture {
         hooks,
-        resolver.clone(),
+        resolver,
         clock,
         model,
         jobs,
