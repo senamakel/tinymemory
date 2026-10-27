@@ -215,7 +215,7 @@ pub async fn scan(host: &dyn LayoutHost) -> Result<ScanView> {
         {
             false
         }
-        Phase::Idle if !state.switched => match host.engines() {
+        Phase::Idle if !state.switched => match host.engines().await {
             // Memory off or signed out: nothing to show.
             Err(Error::Off(_)) => false,
             Err(error) => return Err(error),

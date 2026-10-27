@@ -94,7 +94,7 @@ pub trait LayoutHost: Send + Sync {
     /// # Errors
     ///
     /// When memory is off or the account has no per-user root.
-    fn engines(&self) -> Result<Engines>;
+    async fn engines(&self) -> Result<Engines>;
 
     /// Where items go in the per-user tree.
     ///
@@ -167,7 +167,7 @@ where
     if state.phase == Phase::Cleaned && (state.rechecked || !host.listed_unconfirmed()) {
         return Ok(Outcome::Done);
     }
-    let engines = host.engines()?;
+    let engines = host.engines().await?;
     if state.phase == Phase::Idle && !state.switched && !legacy_present(&*engines.legacy).await? {
         return nothing_to_move(host, &mut state).await;
     }

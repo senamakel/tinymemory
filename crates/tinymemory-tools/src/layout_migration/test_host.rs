@@ -100,7 +100,7 @@ impl LayoutHost for FakeHost {
         &self.store
     }
 
-    fn engines(&self) -> Result<Engines> {
+    async fn engines(&self) -> Result<Engines> {
         Ok(Engines {
             legacy: self.legacy.clone(),
             tree: self.tree.clone(),
