@@ -327,7 +327,7 @@ async fn pre_turn_awaits_async_engine_resolution() {
     let clock = FakeClock::at(Duration::ZERO);
     let citations = Arc::new(RecordingCitations::default());
     let hooks = TurnHooks::new(
-        resolver,
+        resolver.clone(),
         Arc::new(clock.clone()),
         None,
         Arc::new(RecordingJobs::default()),
