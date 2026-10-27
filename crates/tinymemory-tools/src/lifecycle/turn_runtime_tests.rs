@@ -138,6 +138,21 @@ struct StaticResolver {
     advance: Duration,
 }
 
+struct DeferredResolver {
+    memory: AgentMemory,
+    release: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl EngineResolver for DeferredResolver {
+    async fn resolve(&self) -> Result<AgentMemory> {
+        if let Some(release) = self.release.lock().unwrap().take() {
+            let _ = release.await;
+        }
+        Ok(self.memory.clone())
+    }
+}
+
 impl EngineResolver for StaticResolver {
     async fn resolve(&self) -> Result<AgentMemory> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -294,6 +309,39 @@ fn fixture_with_memory_and_advance(
         citations,
         engine: reference,
     }
+}
+
+#[tokio::test]
+async fn pre_turn_awaits_async_engine_resolution() {
+    let engine = Arc::new(ReferenceEngine::new());
+    let (release, wait) = oneshot::channel();
+    let resolver = Arc::new(DeferredResolver {
+        memory: memory(engine),
+        release: Mutex::new(Some(wait)),
+    });
+    let clock = FakeClock::at(Duration::ZERO);
+    let citations = Arc::new(RecordingCitations::default());
+    let hooks = TurnHooks::new(
+        resolver,
+        Arc::new(clock.clone()),
+        None,
+        Arc::new(RecordingJobs::default()),
+        citations.clone(),
+    );
+    let mut work = Box::pin(hooks.pre_turn(
+        PreTurn::new("thread", 0, "remember this"),
+        options(true, true),
+    ));
+
+    poll_fn(|cx| match work.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(_) => panic!("pre-turn completed before async engine resolution"),
+    })
+    .await;
+    release.send(()).unwrap();
+
+    assert!(work.await.is_some());
+    assert_eq!(citations.calls.load(Ordering::SeqCst), 0);
 }
 
 fn options(logging: bool, recall: bool) -> PreTurnOptions {
