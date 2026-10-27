@@ -134,7 +134,7 @@ impl LayoutHost for FakeHost {
         self.free.load(Ordering::SeqCst) && left > 0
     }
 
-    fn legacy_claim(&self) -> Result<Option<Box<dyn LegacyClaim>>> {
+    async fn legacy_claim(&self) -> Result<Option<Box<dyn LegacyClaim>>> {
         Ok(self
             .claim
             .clone()

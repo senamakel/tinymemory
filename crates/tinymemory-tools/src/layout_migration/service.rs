@@ -197,7 +197,7 @@ pub struct MigrationStatus {
 /// tree cannot be read.
 pub async fn scan(host: &dyn LayoutHost) -> Result<ScanView> {
     let state = host.store().load()?;
-    let claim = match host.legacy_claim() {
+    let claim = match host.legacy_claim().await {
         // Memory off or signed out: nothing to show.
         Err(Error::Off(_)) => None,
         claim => claim?,

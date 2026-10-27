@@ -128,7 +128,7 @@ pub trait LayoutHost: Send + Sync {
     /// # Errors
     ///
     /// When memory is off or the account has no per-user root.
-    fn legacy_claim(&self) -> Result<Option<Box<dyn LegacyClaim>>>;
+    async fn legacy_claim(&self) -> Result<Option<Box<dyn LegacyClaim>>>;
 
     /// Whether the last import of old local memory ended with its last batch
     /// not confirmed listed. The migration then forgets by id, never erasing
@@ -175,7 +175,7 @@ where
         state.takeover = true;
         store.save(&state)?;
     }
-    let shared = host.legacy_claim()?;
+    let shared = host.legacy_claim().await?;
     if let Some(claim) = &shared {
         if claim.held_by_other()? {
             return claimed_elsewhere(host, &mut state).await;

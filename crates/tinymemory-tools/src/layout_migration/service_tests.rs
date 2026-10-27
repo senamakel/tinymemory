@@ -239,8 +239,8 @@ impl LayoutHost for CountingHost {
         self.inner.free_now().await
     }
 
-    fn legacy_claim(&self) -> crate::layout_migration::Result<Option<Box<dyn LegacyClaim>>> {
-        self.inner.legacy_claim()
+    async fn legacy_claim(&self) -> crate::layout_migration::Result<Option<Box<dyn LegacyClaim>>> {
+        self.inner.legacy_claim().await
     }
 
     fn listed_unconfirmed(&self) -> bool {
